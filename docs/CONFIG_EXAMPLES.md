@@ -34,6 +34,18 @@ Veyra merges files in this order:
 3. `catalogs.toml` (append catalog profiles)
 4. `ai.toml` (AI settings; provider tables can be `[[ai.providers]]` or `[[providers]]`)
 
+## Runtime Reload Behavior
+
+Profile data is only loaded on startup and when explicitly requested.
+
+- Press `Ctrl+R`, or use **Reload profile** from Settings, to re-read all profile files and rebuild catalog indexes.
+- Use **Refresh catalogs** in the Catalogs view to force re-running catalog indexing after changing `catalogs.toml`.
+- **Open profile file** actions in Settings create missing files using the same templates shown below:
+  - `config.toml`
+  - `commands.toml`
+  - `catalogs.toml`
+  - `ai.toml`
+
 ## config.toml
 
 ```toml

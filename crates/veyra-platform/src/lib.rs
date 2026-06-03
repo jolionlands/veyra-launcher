@@ -1,6 +1,3 @@
-#[cfg(windows)]
-use std::collections::VecDeque;
-#[cfg(not(windows))]
 use std::collections::VecDeque;
 use std::process::Command;
 use std::{

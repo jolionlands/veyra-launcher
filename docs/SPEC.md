@@ -64,6 +64,7 @@ Expected defaults:
 - `Tab`: accept completion or enter action mode.
 - `Esc`: clear query, then close.
 - `Ctrl+,`: settings.
+- `Ctrl+R`: reload profile and rebuild catalog from profile files.
 
 ## Settings UI
 
@@ -81,7 +82,19 @@ Settings are built into the app:
 - Diagnostics
 - About
 
-Every setting must have a config-file equivalent.
+Every setting has a config-file equivalent.
+
+## Settings Operations
+
+- General and Diagnostics views provide reload controls (`Reload profile`, `Reload`) to rebuild runtime state after editing profile files.
+- Catalogs view provides `Refresh catalogs` to force a catalog re-scan without restarting.
+- The settings UI can open:
+  - the active profile folder,
+  - `config.toml`,
+  - `commands.toml`,
+  - `catalogs.toml`,
+  - `ai.toml`.
+- Opening any profile file path from settings creates the file with a default template when it is missing.
 
 ## MVP
 
@@ -95,4 +108,3 @@ The first useful MVP is complete when it can:
 - Expose an AI query command using an OpenAI-compatible local endpoint.
 - Build on Windows ARM64 and Windows x64.
 - Document Linux build targets.
-

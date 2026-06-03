@@ -41,6 +41,8 @@ Supported profile files (all optional):
 - `catalogs.toml` - file catalog profiles
 - `ai.toml` - AI section and provider config
 
+The settings UI can open these files in-place and create missing ones from built-in templates.
+
 ## Catalog Sources at Startup
 
 - Veyra scans startup sources and appends discovered items to the catalog:
@@ -50,6 +52,12 @@ Supported profile files (all optional):
 - On Windows, executables are filtered by `PATHEXT` (or default suffixes); on Linux/macOS, files must be executable.
 - Items are deduplicated by normalized executable name and canonical path; first match wins.
 - File catalogs honor `recursive`, `max_depth`, `include_patterns`, `exclude_patterns`, and `follow_symlinks`.
+
+Catalogs are rebuilt from the same startup scan path when profile reload is requested:
+
+- `Ctrl+R` in the launcher.
+- `Reload profile` on the General or Diagnostics settings pages.
+- `Refresh catalogs` on the Catalogs settings page.
 
 ## Run
 
@@ -69,7 +77,10 @@ cargo run -p veyra-import -- keypirinha --source C:\Tools\Keypirinha --profile "
 1. Edit files under the active profile (or `portable/`).
 2. Run `cargo run -p veyra-app`.
 3. Open launcher with `Alt+Space`, search profile items, then run with `Enter`.
-4. Open settings (`Ctrl+,`) and review `Diagnostics` for loaded/missing profile files.
+4. Open settings (`Ctrl+,`) to:
+   - open the profile folder,
+   - open or create `config.toml`, `commands.toml`, `catalogs.toml`, and `ai.toml`,
+   - reload catalog data after edits.
 
 ## Check
 

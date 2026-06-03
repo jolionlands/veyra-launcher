@@ -49,55 +49,40 @@ impl VeyraApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let profile_dir = profile_dir("Veyra");
-        let (config, mut loaded_items, mut load_messages) = load_profile(&profile_dir);
-        let platform_items = discover_platform_catalog_items();
-        let path_item_count = platform_items
-            .iter()
-            .filter(|item| item.source == "path")
-            .count();
-        let start_menu_item_count = platform_items
-            .iter()
-            .filter(|item| item.source == "start_menu")
-            .count();
-        load_messages.push(format!(
-            "Discovered {path_item_count} PATH executables and {start_menu_item_count} Start Menu shortcuts"
-        ));
-        loaded_items.extend(platform_items);
-        let file_catalog = discover_file_catalog_items(&config.catalogs);
-        let file_catalog_item_count = file_catalog.items.len();
-        let file_catalog_skipped_paths = file_catalog.skipped_paths;
-        load_messages.push(format!(
-            "Indexed {file_catalog_item_count} file catalog items from {} enabled profiles",
-            file_catalog.enabled_profiles
-        ));
-        if file_catalog_skipped_paths > 0 {
-            load_messages.push(format!(
-                "Skipped {file_catalog_skipped_paths} missing or unsupported catalog paths"
-            ));
-        }
-        loaded_items.extend(file_catalog.items);
-        let mut catalog = seed_catalog();
-        catalog.extend(loaded_items);
+        let runtime = load_runtime_state(&profile_dir);
 
         Self {
             query: String::new(),
-            catalog,
+            catalog: runtime.catalog,
             show_settings: false,
             settings_page: SettingsPage::General,
             selected: 0,
             last_status: None,
             profile_dir,
-            config,
-            load_messages,
-            path_item_count,
-            start_menu_item_count,
-            file_catalog_item_count,
-            file_catalog_skipped_paths,
+            config: runtime.config,
+            load_messages: runtime.load_messages,
+            path_item_count: runtime.path_item_count,
+            start_menu_item_count: runtime.start_menu_item_count,
+            file_catalog_item_count: runtime.file_catalog_item_count,
+            file_catalog_skipped_paths: runtime.file_catalog_skipped_paths,
         }
     }
 
     fn results(&self) -> Vec<SearchResult> {
         search(&self.catalog, &self.query)
+    }
+
+    fn reload_profile(&mut self) {
+        let runtime = load_runtime_state(&self.profile_dir);
+        self.config = runtime.config;
+        self.catalog = runtime.catalog;
+        self.load_messages = runtime.load_messages;
+        self.path_item_count = runtime.path_item_count;
+        self.start_menu_item_count = runtime.start_menu_item_count;
+        self.file_catalog_item_count = runtime.file_catalog_item_count;
+        self.file_catalog_skipped_paths = runtime.file_catalog_skipped_paths;
+        self.selected = 0;
+        self.last_status = Some(format!("Reloaded {} catalog items", self.catalog.len()));
     }
 }
 
@@ -115,6 +100,10 @@ impl eframe::App for VeyraApp {
 
         if ctx.input(|input| input.modifiers.ctrl && input.key_pressed(Key::Comma)) {
             self.show_settings = !self.show_settings;
+        }
+
+        if ctx.input(|input| input.modifiers.ctrl && input.key_pressed(Key::R)) {
+            self.reload_profile();
         }
 
         Frame::new()
@@ -263,6 +252,40 @@ impl VeyraApp {
         action
     }
 
+    fn open_profile_dir(&mut self) {
+        if let Err(error) = fs::create_dir_all(&self.profile_dir) {
+            self.last_status = Some(format!("Could not create profile folder: {error}"));
+            return;
+        }
+
+        self.open_path(self.profile_dir.clone(), "Opened profile folder");
+    }
+
+    fn open_profile_file(&mut self, profile_file: ProfileFile) {
+        let path = self.profile_dir.join(profile_file.file_name());
+        if let Err(error) = ensure_profile_file(&path, profile_file.template()) {
+            self.last_status = Some(format!(
+                "Could not create {}: {error}",
+                profile_file.file_name()
+            ));
+            return;
+        }
+
+        self.open_path(path, format!("Opened {}", profile_file.file_name()));
+    }
+
+    fn open_path(&mut self, path: PathBuf, success_message: impl Into<String>) {
+        let action = Action::open_file(path.to_string_lossy().to_string());
+        match execute_action(&action) {
+            Ok(()) => {
+                self.last_status = Some(success_message.into());
+            }
+            Err(error) => {
+                self.last_status = Some(format!("Could not open {}: {}", path.display(), error));
+            }
+        }
+    }
+
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -287,13 +310,22 @@ impl VeyraApp {
         });
     }
 
-    fn render_settings_page(&self, ui: &mut egui::Ui) {
+    fn render_settings_page(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.settings_page.label());
         ui.add_space(8.0);
 
         match self.settings_page {
             SettingsPage::General => {
                 setting_row(ui, "Profile", self.profile_dir.display().to_string());
+                ui.horizontal(|ui| {
+                    if ui.button("Open profile folder").clicked() {
+                        self.open_profile_dir();
+                    }
+                    if ui.button("Reload profile").clicked() {
+                        self.reload_profile();
+                    }
+                });
+                ui.add_space(8.0);
                 setting_row(ui, "Startup", self.config.general.startup.to_string());
                 setting_row(
                     ui,
@@ -324,6 +356,10 @@ impl VeyraApp {
             }
             SettingsPage::Catalogs => {
                 setting_row(ui, "Total catalog items", self.catalog.len().to_string());
+                if ui.button("Refresh catalogs").clicked() {
+                    self.reload_profile();
+                }
+                ui.add_space(8.0);
                 setting_row(ui, "PATH executables", self.path_item_count.to_string());
                 setting_row(
                     ui,
@@ -350,11 +386,24 @@ impl VeyraApp {
                     self.config.web_search.len().to_string(),
                 );
                 setting_row(ui, "Action confirmation", "Per command");
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Open commands.toml").clicked() {
+                        self.open_profile_file(ProfileFile::Commands);
+                    }
+                    if ui.button("Open catalogs.toml").clicked() {
+                        self.open_profile_file(ProfileFile::Catalogs);
+                    }
+                });
             }
             SettingsPage::AiProviders => {
                 setting_row(ui, "Default provider", "Not configured");
                 setting_row(ui, "Local-only mode", "Available");
                 setting_row(ui, "Tool calling", "Manifest based");
+                ui.add_space(8.0);
+                if ui.button("Open ai.toml").clicked() {
+                    self.open_profile_file(ProfileFile::Ai);
+                }
             }
             SettingsPage::Tools => {
                 setting_row(ui, "Tool manifests", "JSON");
@@ -362,6 +411,15 @@ impl VeyraApp {
                 setting_row(ui, "Confirmation", "Safety based");
             }
             SettingsPage::Diagnostics => {
+                ui.horizontal(|ui| {
+                    if ui.button("Reload").clicked() {
+                        self.reload_profile();
+                    }
+                    if ui.button("Open config.toml").clicked() {
+                        self.open_profile_file(ProfileFile::Config);
+                    }
+                });
+                ui.add_space(8.0);
                 setting_row(
                     ui,
                     "Last action",
@@ -426,6 +484,153 @@ fn load_profile(profile_dir: &Path) -> (VeyraConfig, Vec<CatalogItem>, Vec<Strin
     (config, items, messages)
 }
 
+struct RuntimeState {
+    config: VeyraConfig,
+    catalog: Vec<CatalogItem>,
+    load_messages: Vec<String>,
+    path_item_count: usize,
+    start_menu_item_count: usize,
+    file_catalog_item_count: usize,
+    file_catalog_skipped_paths: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileFile {
+    Config,
+    Commands,
+    Catalogs,
+    Ai,
+}
+
+impl ProfileFile {
+    fn file_name(self) -> &'static str {
+        match self {
+            ProfileFile::Config => "config.toml",
+            ProfileFile::Commands => "commands.toml",
+            ProfileFile::Catalogs => "catalogs.toml",
+            ProfileFile::Ai => "ai.toml",
+        }
+    }
+
+    fn template(self) -> &'static str {
+        match self {
+            ProfileFile::Config => DEFAULT_CONFIG_TOML,
+            ProfileFile::Commands => DEFAULT_COMMANDS_TOML,
+            ProfileFile::Catalogs => DEFAULT_CATALOGS_TOML,
+            ProfileFile::Ai => DEFAULT_AI_TOML,
+        }
+    }
+}
+
+const DEFAULT_CONFIG_TOML: &str = r#"[general]
+startup = true
+local_only = false
+history_limit = 5000
+
+[hotkeys]
+toggle = "Alt+Space"
+settings = "Ctrl+,"
+
+[appearance]
+theme = "dark-acrylic"
+opacity = 0.92
+blur = true
+font_size = 15
+max_results = 10
+show_preview = true
+"#;
+
+const DEFAULT_COMMANDS_TOML: &str = r#"[[commands]]
+id = "settings.display"
+label = "Settings: Display"
+command = "explorer.exe"
+args = ["ms-settings:display"]
+terminal = false
+requires_confirmation = false
+keywords = ["display", "monitor", "resolution"]
+
+[[web_search]]
+id = "github.code"
+alias = "gh"
+label = "GitHub Code"
+url = "https://github.com/search?q={query}&type=code"
+"#;
+
+const DEFAULT_CATALOGS_TOML: &str = r#"[[catalogs]]
+id = "development"
+label = "Development"
+paths = ["%USERPROFILE%\\Development"]
+include_patterns = ["*.md", "*.toml", "*.rs"]
+exclude_patterns = ["**\\node_modules\\**", "**\\.git\\**"]
+recursive = true
+follow_symlinks = false
+max_depth = 6
+enabled = true
+"#;
+
+const DEFAULT_AI_TOML: &str = r#"[ai]
+enabled = false
+default_provider = "local"
+local_only = false
+warmup_on_startup = false
+
+[[providers]]
+id = "local"
+label = "Local OpenAI-compatible"
+base_url = "http://127.0.0.1:8080/v1"
+model = "local-model"
+api_key_env = ""
+local_only = true
+enabled = true
+timeout_ms = 60000
+supports_streaming = true
+supports_tools = true
+"#;
+
+fn load_runtime_state(profile_dir: &Path) -> RuntimeState {
+    let (config, mut loaded_items, mut load_messages) = load_profile(profile_dir);
+    let platform_items = discover_platform_catalog_items();
+    let path_item_count = platform_items
+        .iter()
+        .filter(|item| item.source == "path")
+        .count();
+    let start_menu_item_count = platform_items
+        .iter()
+        .filter(|item| item.source == "start_menu")
+        .count();
+    load_messages.push(format!(
+        "Discovered {path_item_count} PATH executables and {start_menu_item_count} Start Menu shortcuts"
+    ));
+    loaded_items.extend(platform_items);
+
+    let file_catalog = discover_file_catalog_items(&config.catalogs);
+    let file_catalog_item_count = file_catalog.items.len();
+    let file_catalog_skipped_paths = file_catalog.skipped_paths;
+    load_messages.push(format!(
+        "Indexed {file_catalog_item_count} file catalog items from {} enabled profiles",
+        file_catalog.enabled_profiles
+    ));
+    if file_catalog_skipped_paths > 0 {
+        load_messages.push(format!(
+            "Skipped {file_catalog_skipped_paths} missing or unsupported catalog paths"
+        ));
+    }
+    loaded_items.extend(file_catalog.items);
+
+    let mut catalog = seed_catalog();
+    catalog.extend(loaded_items);
+
+    RuntimeState {
+        config,
+        catalog,
+        load_messages,
+        path_item_count,
+        start_menu_item_count,
+        file_catalog_item_count,
+        file_catalog_skipped_paths,
+    }
+}
+
 fn merge_config_file(
     path: PathBuf,
     mode: ConfigMergeMode,
@@ -451,6 +656,17 @@ fn merge_config_file(
             messages.push(format!("Could not read {}: {}", path.display(), error));
         }
     }
+}
+
+fn ensure_profile_file(path: &Path, template: &str) -> std::io::Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, template)
 }
 
 fn merge_config(target: &mut VeyraConfig, mut incoming: VeyraConfig, mode: ConfigMergeMode) {
@@ -774,6 +990,51 @@ mod tests {
         assert_eq!(config.catalogs.len(), 1);
         assert_eq!(config.catalogs[0].id, "imported");
         assert_eq!(items.len(), 1);
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn ensure_profile_file_creates_missing_file_without_overwriting() {
+        let profile = temp_profile_dir();
+        let path = profile.join("commands.toml");
+
+        ensure_profile_file(&path, "first").unwrap();
+        ensure_profile_file(&path, "second").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "first");
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn runtime_state_indexes_imported_file_catalogs() {
+        let profile = temp_profile_dir();
+        let files = profile.join("files");
+        fs::create_dir_all(&files).unwrap();
+        fs::write(files.join("note.md"), "note").unwrap();
+        fs::write(
+            profile.join("commands.toml"),
+            format!(
+                r#"
+                [[catalogs]]
+                id = "docs"
+                label = "Docs"
+                paths = ["{}"]
+                include_patterns = ["*.md"]
+                recursive = true
+                enabled = true
+            "#,
+                files.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .unwrap();
+
+        let runtime = load_runtime_state(&profile);
+
+        assert_eq!(runtime.config.catalogs.len(), 1);
+        assert_eq!(runtime.file_catalog_item_count, 1);
+        assert!(runtime.catalog.iter().any(|item| item.label == "note.md"));
 
         fs::remove_dir_all(&profile).ok();
     }
