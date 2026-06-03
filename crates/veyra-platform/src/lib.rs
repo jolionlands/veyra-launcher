@@ -143,6 +143,7 @@ fn executable_extensions() -> Vec<String> {
     }
 }
 
+#[cfg(any(windows, test))]
 fn parse_executable_extensions(value: &str) -> Vec<String> {
     let mut extensions = Vec::new();
 
