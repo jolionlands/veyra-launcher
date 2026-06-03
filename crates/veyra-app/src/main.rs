@@ -1,8 +1,14 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use eframe::egui::{
     self, Align, Color32, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, Vec2,
 };
-use veyra_core::{Action, ActionKind, CatalogItem, SearchResult, search, seed_catalog};
-use veyra_platform::{execute_action, profile_dir};
+use veyra_core::config::{CommandEntry, VeyraConfig, WebSearchEntry};
+use veyra_core::{
+    Action, ActionKind, CatalogItem, ItemCategory, SearchResult, search, seed_catalog,
+};
+use veyra_platform::{discover_path_executables, execute_action, profile_dir};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -28,18 +34,35 @@ struct VeyraApp {
     settings_page: SettingsPage,
     selected: usize,
     last_status: Option<String>,
+    profile_dir: PathBuf,
+    config: VeyraConfig,
+    load_messages: Vec<String>,
+    path_item_count: usize,
 }
 
 impl VeyraApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
+        let profile_dir = profile_dir("Veyra");
+        let (config, mut loaded_items, mut load_messages) = load_profile(&profile_dir);
+        let path_items = discover_path_executables();
+        let path_item_count = path_items.len();
+        load_messages.push(format!("Discovered {path_item_count} PATH executables"));
+        loaded_items.extend(path_items);
+        let mut catalog = seed_catalog();
+        catalog.extend(loaded_items);
+
         Self {
             query: String::new(),
-            catalog: seed_catalog(),
+            catalog,
             show_settings: false,
             settings_page: SettingsPage::General,
             selected: 0,
             last_status: None,
+            profile_dir,
+            config,
+            load_messages,
+            path_item_count,
         }
     }
 
@@ -240,32 +263,48 @@ impl VeyraApp {
 
         match self.settings_page {
             SettingsPage::General => {
-                setting_row(ui, "Profile", profile_dir("Veyra").display().to_string());
-                setting_row(ui, "Startup", "Planned");
-                setting_row(ui, "History limit", "5000");
+                setting_row(ui, "Profile", self.profile_dir.display().to_string());
+                setting_row(ui, "Startup", self.config.general.startup.to_string());
+                setting_row(
+                    ui,
+                    "History limit",
+                    self.config.general.history_limit.to_string(),
+                );
                 setting_row(ui, "Portable mode", "Auto-detect");
             }
             SettingsPage::Appearance => {
-                setting_row(ui, "Theme", "Dark acrylic");
-                setting_row(ui, "Opacity", "92%");
-                setting_row(ui, "Blur", "Enabled where supported");
-                setting_row(ui, "Preview pane", "Planned");
+                setting_row(ui, "Theme", self.config.appearance.theme.as_str());
+                setting_row(
+                    ui,
+                    "Opacity",
+                    format!("{:.0}%", self.config.appearance.opacity * 100.0),
+                );
+                setting_row(ui, "Blur", self.config.appearance.blur.to_string());
+                setting_row(
+                    ui,
+                    "Preview pane",
+                    self.config.appearance.show_preview.to_string(),
+                );
             }
             SettingsPage::Hotkeys => {
-                setting_row(ui, "Toggle launcher", "Alt+Space");
-                setting_row(ui, "Settings", "Ctrl+,");
+                setting_row(ui, "Toggle launcher", self.config.hotkeys.toggle.as_str());
+                setting_row(ui, "Settings", self.config.hotkeys.settings.as_str());
                 setting_row(ui, "Alternate action", "Shift+Enter");
                 setting_row(ui, "Elevated action", "Ctrl+Enter");
             }
             SettingsPage::Catalogs => {
-                setting_row(ui, "Built-in seed items", self.catalog.len().to_string());
+                setting_row(ui, "Total catalog items", self.catalog.len().to_string());
                 setting_row(ui, "Start Menu", "Planned");
-                setting_row(ui, "PATH executables", "Planned");
+                setting_row(ui, "PATH executables", self.path_item_count.to_string());
                 setting_row(ui, "File profiles", "Planned");
             }
             SettingsPage::Commands => {
-                setting_row(ui, "User commands", "Planned");
-                setting_row(ui, "Web shortcuts", "Seeded");
+                setting_row(ui, "User commands", self.config.commands.len().to_string());
+                setting_row(
+                    ui,
+                    "Web shortcuts",
+                    self.config.web_search.len().to_string(),
+                );
                 setting_row(ui, "Action confirmation", "Per command");
             }
             SettingsPage::AiProviders => {
@@ -290,9 +329,165 @@ impl VeyraApp {
                     format!("{:?}", veyra_platform::current_platform()),
                 );
                 setting_row(ui, "Catalog items", self.catalog.len().to_string());
+                if !self.load_messages.is_empty() {
+                    ui.separator();
+                    for message in &self.load_messages {
+                        ui.label(RichText::new(message).color(Color32::from_rgb(160, 170, 184)));
+                    }
+                }
             }
         }
     }
+}
+
+fn load_profile(profile_dir: &Path) -> (VeyraConfig, Vec<CatalogItem>, Vec<String>) {
+    let mut config = VeyraConfig::default();
+    let mut messages = Vec::new();
+
+    merge_config_file(
+        profile_dir.join("config.toml"),
+        ConfigMergeMode::Full,
+        &mut config,
+        &mut messages,
+    );
+    merge_config_file(
+        profile_dir.join("commands.toml"),
+        ConfigMergeMode::CommandsOnly,
+        &mut config,
+        &mut messages,
+    );
+    merge_config_file(
+        profile_dir.join("catalogs.toml"),
+        ConfigMergeMode::CatalogsOnly,
+        &mut config,
+        &mut messages,
+    );
+    merge_config_file(
+        profile_dir.join("ai.toml"),
+        ConfigMergeMode::AiOnly,
+        &mut config,
+        &mut messages,
+    );
+
+    let items = catalog_items_from_config(&config);
+    if items.is_empty() {
+        messages.push(format!(
+            "No user commands loaded from {}",
+            profile_dir.display()
+        ));
+    } else {
+        messages.push(format!("Loaded {} user catalog items", items.len()));
+    }
+
+    (config, items, messages)
+}
+
+fn merge_config_file(
+    path: PathBuf,
+    mode: ConfigMergeMode,
+    target: &mut VeyraConfig,
+    messages: &mut Vec<String>,
+) {
+    if !path.exists() {
+        messages.push(format!("Skipped missing {}", path.display()));
+        return;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(raw) => match VeyraConfig::from_toml_str(&raw) {
+            Ok(config) => {
+                merge_config(target, config, mode);
+                messages.push(format!("Loaded {}", path.display()));
+            }
+            Err(error) => {
+                messages.push(format!("Could not parse {}: {}", path.display(), error));
+            }
+        },
+        Err(error) => {
+            messages.push(format!("Could not read {}: {}", path.display(), error));
+        }
+    }
+}
+
+fn merge_config(target: &mut VeyraConfig, mut incoming: VeyraConfig, mode: ConfigMergeMode) {
+    if mode == ConfigMergeMode::Full {
+        target.general = incoming.general;
+        target.hotkeys = incoming.hotkeys;
+        target.appearance = incoming.appearance;
+    }
+
+    if matches!(mode, ConfigMergeMode::Full | ConfigMergeMode::CommandsOnly) {
+        target.commands.extend(incoming.commands);
+        target.web_search.extend(incoming.web_search);
+    }
+
+    if matches!(mode, ConfigMergeMode::Full | ConfigMergeMode::CatalogsOnly) {
+        target.catalogs.extend(incoming.catalogs);
+    }
+
+    if matches!(mode, ConfigMergeMode::Full | ConfigMergeMode::AiOnly) {
+        if !incoming.providers.is_empty() {
+            incoming.ai.providers = incoming.providers;
+        }
+        target.ai = incoming.ai;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConfigMergeMode {
+    Full,
+    CommandsOnly,
+    CatalogsOnly,
+    AiOnly,
+}
+
+fn catalog_items_from_config(config: &VeyraConfig) -> Vec<CatalogItem> {
+    config
+        .commands
+        .iter()
+        .filter_map(command_item)
+        .chain(config.web_search.iter().filter_map(web_search_item))
+        .collect()
+}
+
+fn command_item(command: &CommandEntry) -> Option<CatalogItem> {
+    if command.command.trim().is_empty() {
+        return None;
+    }
+
+    let id = non_empty(&command.id).unwrap_or_else(|| format!("command.{}", command.command));
+    let label = non_empty(&command.label).unwrap_or_else(|| command.command.clone());
+    let mut action = Action::launch_with_args(command.command.clone(), command.args.clone());
+    action.requires_confirmation = command.requires_confirmation;
+
+    Some(
+        CatalogItem::new(id, label, ItemCategory::Command, "profile")
+            .subtitle(command.command.clone())
+            .keywords(command.keywords.clone())
+            .action(action),
+    )
+}
+
+fn web_search_item(entry: &WebSearchEntry) -> Option<CatalogItem> {
+    if entry.url.trim().is_empty() {
+        return None;
+    }
+
+    let id = non_empty(&entry.id).unwrap_or_else(|| format!("web.{}", entry.alias));
+    let label = non_empty(&entry.label).unwrap_or_else(|| format!("Web: {}", entry.alias));
+    let keywords = [entry.alias.clone(), label.clone()];
+
+    Some(
+        CatalogItem::new(id, label, ItemCategory::Web, "profile")
+            .subtitle(entry.url.clone())
+            .keywords(keywords)
+            .action(Action::open_url(entry.url.clone())),
+    )
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -372,4 +567,147 @@ fn setting_row(ui: &mut egui::Ui, label: &str, value: impl Into<String>) {
             });
         });
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn loads_profile_config_and_commands() {
+        let profile = temp_profile_dir();
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("config.toml"),
+            r#"
+                [general]
+                startup = false
+                history_limit = 42
+
+                [appearance]
+                theme = "test-theme"
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            profile.join("commands.toml"),
+            r#"
+                [[commands]]
+                id = "command.test"
+                label = "Command: Test"
+                command = "test.exe"
+                args = ["--ok"]
+                keywords = ["test"]
+
+                [[web_search]]
+                id = "web.docs"
+                alias = "docs"
+                label = "Docs"
+                url = "https://example.com/search?q={query}"
+            "#,
+        )
+        .unwrap();
+
+        let (config, items, messages) = load_profile(&profile);
+
+        assert!(!config.general.startup);
+        assert_eq!(config.general.history_limit, 42);
+        assert_eq!(config.appearance.theme, "test-theme");
+        assert_eq!(config.commands.len(), 1);
+        assert_eq!(config.web_search.len(), 1);
+        assert_eq!(items.len(), 2);
+        assert!(messages.iter().any(|message| message.contains("Loaded")));
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn commands_file_does_not_reset_main_config_sections() {
+        let profile = temp_profile_dir();
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("config.toml"),
+            r#"
+                [appearance]
+                theme = "kept"
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            profile.join("commands.toml"),
+            r#"
+                [[commands]]
+                label = "Command: Test"
+                command = "test.exe"
+            "#,
+        )
+        .unwrap();
+
+        let (config, _, _) = load_profile(&profile);
+
+        assert_eq!(config.appearance.theme, "kept");
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn loads_catalogs_and_ai_without_resetting_commands() {
+        let profile = temp_profile_dir();
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("commands.toml"),
+            r#"
+                [[commands]]
+                label = "Command: Test"
+                command = "test.exe"
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            profile.join("catalogs.toml"),
+            r#"
+                [[profiles]]
+                id = "dev"
+                label = "Development"
+                paths = ["%USERPROFILE%\\Development"]
+                max_depth = 4
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            profile.join("ai.toml"),
+            r#"
+                [ai]
+                enabled = true
+                default_provider = "local"
+
+                [[providers]]
+                id = "local"
+                label = "Local"
+                base_url = "http://127.0.0.1:8080/v1"
+                model = "local-model"
+            "#,
+        )
+        .unwrap();
+
+        let (config, _, _) = load_profile(&profile);
+
+        assert_eq!(config.commands.len(), 1);
+        assert_eq!(config.catalogs.len(), 1);
+        assert!(config.ai.enabled);
+        assert_eq!(config.ai.providers.len(), 1);
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    fn temp_profile_dir() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        path.push(format!("veyra-app-profile-test-{nanos}"));
+        path
+    }
 }

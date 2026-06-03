@@ -32,6 +32,7 @@ crates/
   veyra-core/      catalog, scoring, config, actions
   veyra-ai/        providers, tool schemas, chat protocol
   veyra-platform/  Windows/Linux platform integration
+  veyra-import/    migration parsers and import helpers
   veyra-protocol/  external plugin JSON-RPC schemas
 ```
 
@@ -41,6 +42,7 @@ crates/
 - `veyra-core` owns catalog items, actions, scoring, config, and history.
 - `veyra-ai` owns provider settings, tool manifests, and AI execution contracts.
 - `veyra-platform` owns OS-specific integration behind a portable boundary.
+- `veyra-import` owns compatibility parsing for existing launcher profiles.
 - `veyra-protocol` owns schemas shared with external plugins.
 
 The UI must not block on catalog scans, AI calls, icon extraction, or plugin calls.
@@ -52,4 +54,3 @@ The UI must not block on catalog scans, AI calls, icon extraction, or plugin cal
 - AI provider failures produce visible result items and diagnostics.
 - Bad config is reported with file and line context where possible.
 - The launcher must still open when AI is broken.
-

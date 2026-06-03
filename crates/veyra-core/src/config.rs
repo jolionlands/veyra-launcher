@@ -13,10 +13,12 @@ pub struct VeyraConfig {
     pub commands: Vec<CommandEntry>,
     #[serde(default)]
     pub web_search: Vec<WebSearchEntry>,
-    #[serde(default)]
+    #[serde(default, alias = "profiles")]
     pub catalogs: Vec<CatalogProfile>,
     #[serde(default)]
     pub ai: AiConfig,
+    #[serde(default, skip_serializing)]
+    pub providers: Vec<AiProvider>,
 }
 
 impl VeyraConfig {
@@ -377,6 +379,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_standalone_ai_file_provider_tables() {
+        let value = r#"
+            [ai]
+            enabled = true
+            default_provider = "local"
+
+            [[providers]]
+            id = "local"
+            label = "Local"
+            base_url = "http://127.0.0.1:8080/v1"
+            model = "local-model"
+        "#;
+
+        let config = VeyraConfig::from_toml_str(value).unwrap();
+
+        assert!(config.ai.enabled);
+        assert_eq!(config.providers.len(), 1);
+        assert_eq!(config.providers[0].id, "local");
+    }
+
+    #[test]
+    fn parses_profile_alias_for_catalogs() {
+        let value = r#"
+            [[profiles]]
+            id = "dev"
+            label = "Development"
+            paths = ["%USERPROFILE%\\Development"]
+        "#;
+
+        let config = VeyraConfig::from_toml_str(value).unwrap();
+
+        assert_eq!(config.catalogs.len(), 1);
+        assert_eq!(config.catalogs[0].id, "dev");
+    }
+
+    #[test]
     fn apply_defaults_for_missing_sections() {
         let value = "";
         let config = VeyraConfig::from_toml_str(value).unwrap();
@@ -389,5 +427,6 @@ mod tests {
         assert!(config.catalogs.is_empty());
         assert_eq!(config.ai.default_provider, "local");
         assert_eq!(config.ai.providers.len(), 0);
+        assert!(config.providers.is_empty());
     }
 }

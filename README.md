@@ -21,6 +21,7 @@ crates/
   veyra-core/      catalog, scoring, config, actions
   veyra-ai/        providers and tool manifest schemas
   veyra-platform/  platform integration boundary
+  veyra-import/    migration parsers for existing launcher profiles
   veyra-protocol/  external plugin JSON-RPC schemas
 docs/
 ```
@@ -48,4 +49,3 @@ cargo check --workspace
 - `docs/CONFIG_EXAMPLES.md` - TOML config examples
 - `docs/BUILD_MATRIX.md` - target platforms and cross-compile requirements
 - `docs/ROADMAP.md` - phased implementation plan
-
