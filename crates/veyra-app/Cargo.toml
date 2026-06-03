@@ -1,0 +1,9 @@
+[package]
+name = "veyra-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { workspace = true }
+veyra-core = { path = "../veyra-core" }
+veyra-platform = { path = "../veyra-platform" }

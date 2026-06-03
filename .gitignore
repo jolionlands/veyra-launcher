@@ -1,0 +1,10 @@
+/target/
+**/*.pdb
+*.log
+.env
+.env.*
+.DS_Store
+Thumbs.db
+portable/
+profile/
+

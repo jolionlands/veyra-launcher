@@ -1,0 +1,23 @@
+[workspace]
+members = [
+  "crates/veyra-ai",
+  "crates/veyra-app",
+  "crates/veyra-core",
+  "crates/veyra-platform",
+  "crates/veyra-protocol",
+]
+resolver = "3"
+
+[workspace.package]
+authors = ["jolionlands"]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/jolionlands/veyra-launcher"
+rust-version = "1.95"
+
+[workspace.dependencies]
+eframe = "0.34.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+
