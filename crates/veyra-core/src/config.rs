@@ -235,7 +235,7 @@ fn default_history_limit() -> u32 {
 }
 
 fn default_toggle_hotkey() -> String {
-    "Alt+Space".to_string()
+    "Win+Shift+F23".to_string()
 }
 
 fn default_settings_hotkey() -> String {
@@ -420,7 +420,7 @@ mod tests {
         let config = VeyraConfig::from_toml_str(value).unwrap();
 
         assert!(config.general.startup);
-        assert_eq!(config.hotkeys.toggle, "Alt+Space");
+        assert_eq!(config.hotkeys.toggle, "Win+Shift+F23");
         assert_eq!(config.appearance.theme, "dark-acrylic");
         assert!(config.commands.is_empty());
         assert!(config.web_search.is_empty());

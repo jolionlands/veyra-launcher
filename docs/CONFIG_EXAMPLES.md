@@ -55,7 +55,7 @@ local_only = false
 history_limit = 5000
 
 [hotkeys]
-toggle = "Alt+Space"
+toggle = "Win+Shift+F23"
 settings = "Ctrl+,"
 
 [appearance]
@@ -66,6 +66,8 @@ font_size = 15
 max_results = 10
 show_preview = true
 ```
+
+`Win+Shift+F23` is the Copilot-key chord used by many Windows keyboards. Veyra also registers `Alt+Space` as a fallback toggle even when the configured toggle is different.
 
 ## commands.toml
 

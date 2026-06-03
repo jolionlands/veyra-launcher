@@ -59,6 +59,8 @@ Catalogs are rebuilt from the same startup scan path when profile reload is requ
 - `Reload profile` on the General or Diagnostics settings pages.
 - `Refresh catalogs` on the Catalogs settings page.
 
+The launcher registers `Win+Shift+F23` for Copilot-key keyboards and keeps `Alt+Space` as a fallback global toggle.
+
 ## Run
 
 ```powershell
@@ -76,7 +78,7 @@ cargo run -p veyra-import -- keypirinha --source C:\Tools\Keypirinha --profile "
 
 1. Edit files under the active profile (or `portable/`).
 2. Run `cargo run -p veyra-app`.
-3. Open launcher with `Alt+Space`, search profile items, then run with `Enter`.
+3. Open launcher with the Copilot key or `Alt+Space`, search profile items, then run with `Enter`.
 4. Open settings (`Ctrl+,`) to:
    - open the profile folder,
    - open or create `config.toml`, `commands.toml`, `catalogs.toml`, and `ai.toml`,

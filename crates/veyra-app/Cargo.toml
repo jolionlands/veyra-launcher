@@ -5,5 +5,7 @@ edition = "2024"
 
 [dependencies]
 eframe = { workspace = true }
+global-hotkey = "0.8"
+toml_edit = "0.22"
 veyra-core = { path = "../veyra-core" }
 veyra-platform = { path = "../veyra-platform" }

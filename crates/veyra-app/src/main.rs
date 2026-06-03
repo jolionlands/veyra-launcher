@@ -1,9 +1,12 @@
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::{fs, io, sync::mpsc, thread};
 
 use eframe::egui::{
-    self, Align, Color32, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, Vec2,
+    self, Align, Color32, FontId, Frame, Key, Layout, Margin, RichText, ScrollArea, Slider, Stroke,
+    TextEdit, TextStyle, Vec2, WindowLevel,
 };
+use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, hotkey::HotKey};
+use toml_edit::{DocumentMut, value};
 use veyra_core::config::{CommandEntry, VeyraConfig, WebSearchEntry};
 use veyra_core::{
     Action, ActionKind, CatalogItem, ItemCategory, SearchResult, search, seed_catalog,
@@ -18,7 +21,9 @@ fn main() -> eframe::Result<()> {
             .with_title("Veyra")
             .with_inner_size([760.0, 520.0])
             .with_min_inner_size([520.0, 340.0])
-            .with_transparent(true),
+            .with_transparent(true)
+            .with_decorations(false)
+            .with_window_level(WindowLevel::AlwaysOnTop),
         ..Default::default()
     };
 
@@ -34,6 +39,8 @@ struct VeyraApp {
     catalog: Vec<CatalogItem>,
     show_settings: bool,
     settings_page: SettingsPage,
+    window_visible: bool,
+    focus_query: bool,
     selected: usize,
     last_status: Option<String>,
     profile_dir: PathBuf,
@@ -43,19 +50,26 @@ struct VeyraApp {
     start_menu_item_count: usize,
     file_catalog_item_count: usize,
     file_catalog_skipped_paths: usize,
+    hotkeys: HotkeyRuntime,
 }
 
 impl VeyraApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let profile_dir = profile_dir("Veyra");
-        let runtime = load_runtime_state(&profile_dir);
+        let mut runtime = load_runtime_state(&profile_dir);
+        let mut hotkeys = HotkeyRuntime::new(&cc.egui_ctx);
+        runtime
+            .load_messages
+            .extend(hotkeys.register_toggle_hotkeys(&runtime.config));
 
-        Self {
+        let app = Self {
             query: String::new(),
             catalog: runtime.catalog,
             show_settings: false,
             settings_page: SettingsPage::General,
+            window_visible: true,
+            focus_query: true,
             selected: 0,
             last_status: None,
             profile_dir,
@@ -65,14 +79,17 @@ impl VeyraApp {
             start_menu_item_count: runtime.start_menu_item_count,
             file_catalog_item_count: runtime.file_catalog_item_count,
             file_catalog_skipped_paths: runtime.file_catalog_skipped_paths,
-        }
+            hotkeys,
+        };
+        app.apply_appearance(&cc.egui_ctx);
+        app
     }
 
     fn results(&self) -> Vec<SearchResult> {
         search(&self.catalog, &self.query)
     }
 
-    fn reload_profile(&mut self) {
+    fn reload_profile(&mut self, ctx: &egui::Context) {
         let runtime = load_runtime_state(&self.profile_dir);
         self.config = runtime.config;
         self.catalog = runtime.catalog;
@@ -81,52 +98,75 @@ impl VeyraApp {
         self.start_menu_item_count = runtime.start_menu_item_count;
         self.file_catalog_item_count = runtime.file_catalog_item_count;
         self.file_catalog_skipped_paths = runtime.file_catalog_skipped_paths;
+        self.load_messages
+            .extend(self.hotkeys.register_toggle_hotkeys(&self.config));
+        self.apply_appearance(ctx);
         self.selected = 0;
         self.last_status = Some(format!("Reloaded {} catalog items", self.catalog.len()));
     }
 }
 
 impl eframe::App for VeyraApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.process_global_hotkey_events(ctx);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        self.process_global_hotkey_events(&ctx);
+
+        if self.local_toggle_shortcut_pressed(&ctx) {
+            self.toggle_launcher_window(&ctx);
+        }
 
         if ctx.input(|input| input.key_pressed(Key::Escape)) {
-            if self.query.is_empty() {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            if self.show_settings {
+                self.show_settings = false;
+                self.focus_query = true;
+            } else if self.query.is_empty() {
+                self.hide_launcher_window(&ctx);
             } else {
                 self.query.clear();
+                self.selected = 0;
             }
         }
 
         if ctx.input(|input| input.modifiers.ctrl && input.key_pressed(Key::Comma)) {
             self.show_settings = !self.show_settings;
+            self.focus_query = !self.show_settings;
         }
 
         if ctx.input(|input| input.modifiers.ctrl && input.key_pressed(Key::R)) {
-            self.reload_profile();
+            self.reload_profile(&ctx);
         }
 
-        Frame::new()
-            .fill(Color32::from_rgba_unmultiplied(18, 20, 24, 230))
+        let header_response = Frame::new()
+            .fill(self.header_fill())
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.add_space(12.0);
                     ui.heading(RichText::new("Veyra").strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Hide").clicked() {
+                            self.hide_launcher_window(&ctx);
+                        }
                         if ui.button("Settings").clicked() {
                             self.show_settings = !self.show_settings;
+                            self.focus_query = !self.show_settings;
                         }
                     });
                 });
-            });
+            })
+            .response;
+
+        if header_response.dragged() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
 
         Frame::new()
-            .fill(Color32::from_rgba_unmultiplied(20, 22, 27, 224))
-            .stroke(Stroke::new(
-                1.0,
-                Color32::from_rgba_unmultiplied(255, 255, 255, 28),
-            ))
+            .fill(self.surface_fill())
+            .stroke(self.border_stroke())
             .inner_margin(Margin::same(18))
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
@@ -137,28 +177,138 @@ impl eframe::App for VeyraApp {
                 }
             });
     }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0, 0.0, 0.0, 0.0]
+    }
 }
 
 impl VeyraApp {
+    fn apply_appearance(&self, ctx: &egui::Context) {
+        let mut style = (*ctx.global_style()).clone();
+        let base_size = effective_font_size(&self.config);
+        style.text_styles.insert(
+            TextStyle::Heading,
+            FontId::proportional((base_size + 5.0).min(28.0)),
+        );
+        style
+            .text_styles
+            .insert(TextStyle::Body, FontId::proportional(base_size));
+        style.text_styles.insert(
+            TextStyle::Button,
+            FontId::proportional((base_size - 1.0).max(12.0)),
+        );
+        style.text_styles.insert(
+            TextStyle::Monospace,
+            FontId::monospace((base_size - 2.0).max(11.0)),
+        );
+        style.spacing.item_spacing = egui::vec2(9.0, 7.0);
+        style.spacing.button_padding = egui::vec2(10.0, 6.0);
+        style.visuals = egui::Visuals::dark();
+        style.visuals.window_corner_radius = 8.into();
+        style.visuals.widgets.active.corner_radius = 6.into();
+        style.visuals.widgets.hovered.corner_radius = 6.into();
+        style.visuals.widgets.inactive.corner_radius = 6.into();
+        style.visuals.widgets.noninteractive.corner_radius = 6.into();
+        ctx.set_global_style(style);
+    }
+
+    fn process_global_hotkey_events(&mut self, ctx: &egui::Context) {
+        let toggle_requested = self
+            .hotkeys
+            .events
+            .try_iter()
+            .any(|event| self.hotkeys.is_toggle_event(event));
+
+        if toggle_requested {
+            self.toggle_launcher_window(ctx);
+        }
+    }
+
+    fn local_toggle_shortcut_pressed(&self, ctx: &egui::Context) -> bool {
+        ctx.input(|input| {
+            let copilot_pressed = input.modifiers.shift && input.key_pressed(Key::F23);
+            let alt_space_pressed = input.modifiers.alt && input.key_pressed(Key::Space);
+
+            (copilot_pressed && !self.hotkeys.registered_label(COPILOT_TOGGLE_HOTKEY))
+                || (alt_space_pressed && !self.hotkeys.registered_label(FALLBACK_TOGGLE_HOTKEY))
+        })
+    }
+
+    fn toggle_launcher_window(&mut self, ctx: &egui::Context) {
+        if self.window_visible {
+            self.hide_launcher_window(ctx);
+        } else {
+            self.show_launcher_window(ctx);
+        }
+    }
+
+    fn show_launcher_window(&mut self, ctx: &egui::Context) {
+        self.window_visible = true;
+        self.show_settings = false;
+        self.focus_query = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::WindowLevel(WindowLevel::AlwaysOnTop));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+
+    fn hide_launcher_window(&mut self, ctx: &egui::Context) {
+        if !self.hotkeys.has_registered_toggle() {
+            self.last_status =
+                Some("No global toggle registered; leaving launcher visible".to_string());
+            return;
+        }
+
+        self.window_visible = false;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+    }
+
+    fn header_fill(&self) -> Color32 {
+        Color32::from_rgba_unmultiplied(18, 22, 25, alpha_for_opacity(&self.config, 235))
+    }
+
+    fn surface_fill(&self) -> Color32 {
+        let max_alpha = if self.config.appearance.blur {
+            226
+        } else {
+            242
+        };
+        Color32::from_rgba_unmultiplied(20, 23, 27, alpha_for_opacity(&self.config, max_alpha))
+    }
+
+    fn border_stroke(&self) -> Stroke {
+        Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(255, 255, 255, alpha_for_opacity(&self.config, 34)),
+        )
+    }
+
     fn render_launcher(&mut self, ui: &mut egui::Ui) {
-        ui.add(
+        let search_response = ui.add(
             TextEdit::singleline(&mut self.query)
                 .hint_text("Search apps, settings, files, web, and AI tools")
                 .desired_width(f32::INFINITY)
                 .font(egui::TextStyle::Heading),
         );
+        if self.focus_query {
+            search_response.request_focus();
+            self.focus_query = false;
+        }
 
         ui.add_space(12.0);
 
         let results = self.results();
-        if !results.is_empty() {
-            self.selected = self.selected.min(results.len() - 1);
+        let result_limit = effective_max_results(&self.config);
+        let shown_count = results.len().min(result_limit);
+        if shown_count > 0 {
+            self.selected = self.selected.min(shown_count - 1);
         }
 
-        if ui.input(|input| input.key_pressed(Key::ArrowDown)) && !results.is_empty() {
-            self.selected = (self.selected + 1).min(results.len() - 1);
+        if ui.input(|input| input.key_pressed(Key::ArrowDown)) && shown_count > 0 {
+            self.selected = (self.selected + 1).min(shown_count - 1);
         }
-        if ui.input(|input| input.key_pressed(Key::ArrowUp)) && !results.is_empty() {
+        if ui.input(|input| input.key_pressed(Key::ArrowUp)) && shown_count > 0 {
             self.selected = self.selected.saturating_sub(1);
         }
         if ui.input(|input| input.key_pressed(Key::Enter))
@@ -167,8 +317,22 @@ impl VeyraApp {
             self.execute_result(result);
         }
 
-        for (index, result) in results.iter().take(10).enumerate() {
-            self.render_result(ui, index, result);
+        let selected_preview = results.get(self.selected).cloned();
+        if self.config.appearance.show_preview && ui.available_width() >= 680.0 {
+            ui.horizontal(|ui| {
+                let preview_width = 250.0;
+                let results_width = (ui.available_width() - preview_width - 16.0).max(320.0);
+                ui.vertical(|ui| {
+                    ui.set_width(results_width);
+                    self.render_result_list(ui, &results, shown_count);
+                });
+                ui.add_space(8.0);
+                if let Some(result) = selected_preview.as_ref() {
+                    self.render_preview_panel(ui, result, preview_width);
+                }
+            });
+        } else {
+            self.render_result_list(ui, &results, shown_count);
         }
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
@@ -176,19 +340,55 @@ impl VeyraApp {
                 ui.label(RichText::new(status).color(Color32::from_rgb(180, 190, 205)));
             } else {
                 ui.label(
-                    RichText::new("Enter open    Ctrl+, settings    Esc clear/close")
-                        .color(Color32::from_rgb(140, 148, 160)),
+                    RichText::new(format!(
+                        "Enter open    {} toggle    {} settings    Esc hide",
+                        toggle_hint(&self.config),
+                        self.config.hotkeys.settings
+                    ))
+                    .color(Color32::from_rgb(140, 148, 160)),
                 );
             }
         });
     }
 
+    fn render_result_list(
+        &mut self,
+        ui: &mut egui::Ui,
+        results: &[SearchResult],
+        shown_count: usize,
+    ) {
+        if shown_count == 0 {
+            let message = if self.query.trim().is_empty() {
+                "Start typing to search apps, files, settings, commands, web, and AI"
+            } else {
+                "No matches"
+            };
+            Frame::new()
+                .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 10))
+                .corner_radius(6)
+                .inner_margin(Margin::same(14))
+                .show(ui, |ui| {
+                    ui.label(RichText::new(message).color(Color32::from_rgb(165, 174, 188)));
+                });
+            return;
+        }
+
+        ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .max_height((ui.available_height() - 34.0).max(140.0))
+            .show(ui, |ui| {
+                for (index, result) in results.iter().take(shown_count).enumerate() {
+                    self.render_result(ui, index, result);
+                }
+            });
+    }
+
     fn render_result(&mut self, ui: &mut egui::Ui, index: usize, result: &SearchResult) {
         let selected = index == self.selected;
         let fill = if selected {
-            Color32::from_rgba_unmultiplied(72, 104, 136, 150)
+            Color32::from_rgba_unmultiplied(86, 119, 142, alpha_for_opacity(&self.config, 170))
         } else {
-            Color32::from_rgba_unmultiplied(255, 255, 255, 12)
+            Color32::from_rgba_unmultiplied(255, 255, 255, alpha_for_opacity(&self.config, 18))
         };
 
         let response = Frame::new()
@@ -223,6 +423,41 @@ impl VeyraApp {
             self.execute_result(result);
         }
         ui.add_space(6.0);
+    }
+
+    fn render_preview_panel(&self, ui: &mut egui::Ui, result: &SearchResult, width: f32) {
+        Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(
+                255,
+                255,
+                255,
+                alpha_for_opacity(&self.config, 13),
+            ))
+            .stroke(self.border_stroke())
+            .corner_radius(6)
+            .inner_margin(Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(width);
+                ui.label(RichText::new(category_label(&result.item)).monospace());
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(&result.item.label)
+                        .strong()
+                        .size(preview_heading_size(&self.config)),
+                );
+                if let Some(subtitle) = &result.item.subtitle {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(subtitle).color(Color32::from_rgb(170, 179, 194)));
+                }
+                ui.add_space(14.0);
+                setting_row(ui, "Source", result.item.source.as_str());
+                setting_row(ui, "Score", result.score.to_string());
+                if let Some(action) = result.item.actions.first()
+                    && let Some(command) = &action.command
+                {
+                    setting_row(ui, "Action", command.as_str());
+                }
+            });
     }
 
     fn execute_result(&mut self, result: &SearchResult) {
@@ -286,6 +521,18 @@ impl VeyraApp {
         }
     }
 
+    fn save_config_sections(&mut self) {
+        let path = self.profile_dir.join(ProfileFile::Config.file_name());
+        match write_config_sections(&path, &self.config) {
+            Ok(()) => {
+                self.last_status = Some(format!("Saved {}", ProfileFile::Config.file_name()));
+            }
+            Err(error) => {
+                self.last_status = Some(format!("Could not save config.toml: {error}"));
+            }
+        }
+    }
+
     fn render_settings(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -322,11 +569,16 @@ impl VeyraApp {
                         self.open_profile_dir();
                     }
                     if ui.button("Reload profile").clicked() {
-                        self.reload_profile();
+                        self.reload_profile(ui.ctx());
                     }
                 });
                 ui.add_space(8.0);
                 setting_row(ui, "Startup", self.config.general.startup.to_string());
+                let mut local_only = self.config.general.local_only;
+                if ui.checkbox(&mut local_only, "Local-only mode").changed() {
+                    self.config.general.local_only = local_only;
+                    self.save_config_sections();
+                }
                 setting_row(
                     ui,
                     "History limit",
@@ -335,21 +587,72 @@ impl VeyraApp {
                 setting_row(ui, "Portable mode", "Auto-detect");
             }
             SettingsPage::Appearance => {
-                setting_row(ui, "Theme", self.config.appearance.theme.as_str());
-                setting_row(
-                    ui,
-                    "Opacity",
-                    format!("{:.0}%", self.config.appearance.opacity * 100.0),
-                );
-                setting_row(ui, "Blur", self.config.appearance.blur.to_string());
-                setting_row(
-                    ui,
-                    "Preview pane",
-                    self.config.appearance.show_preview.to_string(),
-                );
+                let mut changed = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Theme");
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.config.appearance.theme,
+                            "dark-acrylic".to_string(),
+                            "Dark acrylic",
+                        )
+                        .changed();
+                    changed |= ui
+                        .selectable_value(
+                            &mut self.config.appearance.theme,
+                            "dark-compact".to_string(),
+                            "Dark compact",
+                        )
+                        .changed();
+                });
+
+                let mut opacity = (self.config.appearance.opacity * 100.0).round();
+                if ui
+                    .add(Slider::new(&mut opacity, 70.0..=100.0).text("Opacity"))
+                    .changed()
+                {
+                    self.config.appearance.opacity = opacity / 100.0;
+                    changed = true;
+                }
+
+                let mut font_size = self.config.appearance.font_size;
+                if ui
+                    .add(Slider::new(&mut font_size, 12..=22).text("Text size"))
+                    .changed()
+                {
+                    self.config.appearance.font_size = font_size;
+                    changed = true;
+                }
+
+                let mut max_results = self.config.appearance.max_results;
+                if ui
+                    .add(Slider::new(&mut max_results, 4..=24).text("Visible results"))
+                    .changed()
+                {
+                    self.config.appearance.max_results = max_results;
+                    changed = true;
+                }
+
+                changed |= ui
+                    .checkbox(
+                        &mut self.config.appearance.blur,
+                        "Acrylic-style transparency",
+                    )
+                    .changed();
+                changed |= ui
+                    .checkbox(&mut self.config.appearance.show_preview, "Preview pane")
+                    .changed();
+
+                if changed {
+                    self.apply_appearance(ui.ctx());
+                    self.save_config_sections();
+                }
             }
             SettingsPage::Hotkeys => {
                 setting_row(ui, "Toggle launcher", self.config.hotkeys.toggle.as_str());
+                setting_row(ui, "Copilot key", COPILOT_TOGGLE_HOTKEY);
+                setting_row(ui, "Fallback toggle", FALLBACK_TOGGLE_HOTKEY);
+                setting_row(ui, "Registered", self.hotkeys.registered_labels());
                 setting_row(ui, "Settings", self.config.hotkeys.settings.as_str());
                 setting_row(ui, "Alternate action", "Shift+Enter");
                 setting_row(ui, "Elevated action", "Ctrl+Enter");
@@ -357,7 +660,7 @@ impl VeyraApp {
             SettingsPage::Catalogs => {
                 setting_row(ui, "Total catalog items", self.catalog.len().to_string());
                 if ui.button("Refresh catalogs").clicked() {
-                    self.reload_profile();
+                    self.reload_profile(ui.ctx());
                 }
                 ui.add_space(8.0);
                 setting_row(ui, "PATH executables", self.path_item_count.to_string());
@@ -413,10 +716,13 @@ impl VeyraApp {
             SettingsPage::Diagnostics => {
                 ui.horizontal(|ui| {
                     if ui.button("Reload").clicked() {
-                        self.reload_profile();
+                        self.reload_profile(ui.ctx());
                     }
                     if ui.button("Open config.toml").clicked() {
                         self.open_profile_file(ProfileFile::Config);
+                    }
+                    if ui.button("Quit Veyra").clicked() {
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
                 ui.add_space(8.0);
@@ -494,6 +800,102 @@ struct RuntimeState {
     file_catalog_skipped_paths: usize,
 }
 
+struct HotkeyRuntime {
+    manager: Option<GlobalHotKeyManager>,
+    registered_hotkeys: Vec<HotKey>,
+    toggle_hotkey_ids: Vec<u32>,
+    registered_labels: Vec<String>,
+    events: mpsc::Receiver<GlobalHotKeyEvent>,
+}
+
+impl HotkeyRuntime {
+    fn new(ctx: &egui::Context) -> Self {
+        Self {
+            manager: GlobalHotKeyManager::new().ok(),
+            registered_hotkeys: Vec::new(),
+            toggle_hotkey_ids: Vec::new(),
+            registered_labels: Vec::new(),
+            events: spawn_global_hotkey_event_pump(ctx),
+        }
+    }
+
+    fn register_toggle_hotkeys(&mut self, config: &VeyraConfig) -> Vec<String> {
+        let mut messages = Vec::new();
+        let Some(manager) = &self.manager else {
+            messages.push("Global hotkeys unavailable on this session".to_string());
+            return messages;
+        };
+
+        if !self.registered_hotkeys.is_empty()
+            && let Err(error) = manager.unregister_all(&self.registered_hotkeys)
+        {
+            messages.push(format!("Could not unregister old global hotkeys: {error}"));
+        }
+
+        self.registered_hotkeys.clear();
+        self.toggle_hotkey_ids.clear();
+        self.registered_labels.clear();
+
+        for label in toggle_hotkey_candidates(&config.hotkeys.toggle) {
+            match parse_global_hotkey(&label) {
+                Ok(hotkey) => match manager.register(hotkey) {
+                    Ok(()) => {
+                        self.toggle_hotkey_ids.push(hotkey.id());
+                        self.registered_hotkeys.push(hotkey);
+                        self.registered_labels.push(label.clone());
+                        messages.push(format!("Registered global toggle {label}"));
+                    }
+                    Err(error) => {
+                        messages.push(format!("Could not register global toggle {label}: {error}"));
+                    }
+                },
+                Err(error) => {
+                    messages.push(format!("Could not parse global toggle {label}: {error}"));
+                }
+            }
+        }
+
+        messages
+    }
+
+    fn is_toggle_event(&self, event: GlobalHotKeyEvent) -> bool {
+        event.state == HotKeyState::Pressed && self.toggle_hotkey_ids.contains(&event.id)
+    }
+
+    fn registered_label(&self, label: &str) -> bool {
+        self.registered_labels.iter().any(|value| value == label)
+    }
+
+    fn registered_labels(&self) -> String {
+        if self.registered_labels.is_empty() {
+            "None".to_string()
+        } else {
+            self.registered_labels.join(", ")
+        }
+    }
+
+    fn has_registered_toggle(&self) -> bool {
+        !self.toggle_hotkey_ids.is_empty()
+    }
+}
+
+fn spawn_global_hotkey_event_pump(ctx: &egui::Context) -> mpsc::Receiver<GlobalHotKeyEvent> {
+    let (sender, receiver) = mpsc::channel();
+    let ctx = ctx.clone();
+    thread::spawn(move || {
+        for event in GlobalHotKeyEvent::receiver() {
+            if sender.send(event).is_err() {
+                break;
+            }
+            ctx.request_repaint();
+        }
+    });
+    receiver
+}
+
+const COPILOT_TOGGLE_HOTKEY: &str = "Win+Shift+F23";
+const FALLBACK_TOGGLE_HOTKEY: &str = "Alt+Space";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProfileFile {
     Config,
@@ -528,7 +930,7 @@ local_only = false
 history_limit = 5000
 
 [hotkeys]
-toggle = "Alt+Space"
+toggle = "Win+Shift+F23"
 settings = "Ctrl+,"
 
 [appearance]
@@ -807,6 +1209,118 @@ fn encode_query(query: &str) -> String {
         .collect()
 }
 
+fn toggle_hotkey_candidates(configured: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut normalized = Vec::new();
+
+    for candidate in [configured, COPILOT_TOGGLE_HOTKEY, FALLBACK_TOGGLE_HOTKEY] {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+
+        let normalized_candidate = normalize_global_hotkey(candidate);
+        if normalized
+            .iter()
+            .any(|value: &String| value.eq_ignore_ascii_case(&normalized_candidate))
+        {
+            continue;
+        }
+
+        normalized.push(normalized_candidate);
+        candidates.push(candidate.to_string());
+    }
+
+    candidates
+}
+
+fn parse_global_hotkey(hotkey: &str) -> Result<HotKey, global_hotkey::hotkey::HotKeyParseError> {
+    normalize_global_hotkey(hotkey).parse()
+}
+
+fn normalize_global_hotkey(hotkey: &str) -> String {
+    hotkey
+        .split('+')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "win" | "windows" | "meta" | "super" => "Super".to_string(),
+            "shift" => "Shift".to_string(),
+            "alt" | "option" => "Alt".to_string(),
+            "ctrl" | "control" => "Ctrl".to_string(),
+            "escape" => "Esc".to_string(),
+            value if is_function_key(value) => value.to_ascii_uppercase(),
+            _ => part.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("+")
+}
+
+fn is_function_key(value: &str) -> bool {
+    value
+        .strip_prefix('f')
+        .is_some_and(|suffix| suffix.parse::<u8>().is_ok())
+}
+
+fn effective_font_size(config: &VeyraConfig) -> f32 {
+    config.appearance.font_size.clamp(12, 22) as f32
+}
+
+fn preview_heading_size(config: &VeyraConfig) -> f32 {
+    (effective_font_size(config) + 4.0).min(26.0)
+}
+
+fn effective_max_results(config: &VeyraConfig) -> usize {
+    if config.appearance.max_results == 0 {
+        return 10;
+    }
+
+    config.appearance.max_results.clamp(4, 24) as usize
+}
+
+fn alpha_for_opacity(config: &VeyraConfig, max_alpha: u8) -> u8 {
+    (f32::from(max_alpha) * config.appearance.opacity.clamp(0.65, 1.0)).round() as u8
+}
+
+fn toggle_hint(config: &VeyraConfig) -> String {
+    if normalize_global_hotkey(&config.hotkeys.toggle)
+        .eq_ignore_ascii_case(&normalize_global_hotkey(COPILOT_TOGGLE_HOTKEY))
+    {
+        "Copilot / Alt+Space".to_string()
+    } else {
+        format!("{} / Copilot", config.hotkeys.toggle)
+    }
+}
+
+fn write_config_sections(path: &Path, config: &VeyraConfig) -> io::Result<()> {
+    let mut document = if path.exists() {
+        let raw = fs::read_to_string(path)?;
+        raw.parse::<DocumentMut>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+    } else {
+        DocumentMut::new()
+    };
+
+    document["general"]["startup"] = value(config.general.startup);
+    document["general"]["local_only"] = value(config.general.local_only);
+    document["general"]["history_limit"] = value(i64::from(config.general.history_limit));
+
+    document["hotkeys"]["toggle"] = value(config.hotkeys.toggle.clone());
+    document["hotkeys"]["settings"] = value(config.hotkeys.settings.clone());
+
+    document["appearance"]["theme"] = value(config.appearance.theme.clone());
+    document["appearance"]["opacity"] = value(f64::from(config.appearance.opacity));
+    document["appearance"]["blur"] = value(config.appearance.blur);
+    document["appearance"]["font_size"] = value(i64::from(config.appearance.font_size));
+    document["appearance"]["max_results"] = value(i64::from(config.appearance.max_results));
+    document["appearance"]["show_preview"] = value(config.appearance.show_preview);
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, document.to_string())
+}
+
 fn category_label(item: &CatalogItem) -> &'static str {
     match item.category {
         veyra_core::ItemCategory::App => "APP",
@@ -1035,6 +1549,81 @@ mod tests {
         assert_eq!(runtime.config.catalogs.len(), 1);
         assert_eq!(runtime.file_catalog_item_count, 1);
         assert!(runtime.catalog.iter().any(|item| item.label == "note.md"));
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn hotkey_candidates_include_copilot_and_fallback_without_duplicates() {
+        let candidates = toggle_hotkey_candidates("Super+Shift+F23");
+
+        assert_eq!(candidates, vec!["Super+Shift+F23", FALLBACK_TOGGLE_HOTKEY]);
+    }
+
+    #[test]
+    fn normalizes_windows_hotkey_aliases_for_global_parser() {
+        assert_eq!(
+            normalize_global_hotkey("Win + Shift + F23"),
+            "Super+Shift+F23"
+        );
+        assert!(parse_global_hotkey("Win+Shift+F23").is_ok());
+    }
+
+    #[test]
+    fn clamps_appearance_values_for_ui() {
+        let mut config = VeyraConfig::default();
+
+        config.appearance.font_size = 2;
+        config.appearance.max_results = 0;
+        config.appearance.opacity = 0.1;
+        assert_eq!(effective_font_size(&config), 12.0);
+        assert_eq!(effective_max_results(&config), 10);
+        assert_eq!(alpha_for_opacity(&config, 200), 130);
+
+        config.appearance.font_size = 80;
+        config.appearance.max_results = 90;
+        config.appearance.opacity = 2.0;
+        assert_eq!(effective_font_size(&config), 22.0);
+        assert_eq!(effective_max_results(&config), 24);
+        assert_eq!(alpha_for_opacity(&config, 200), 200);
+    }
+
+    #[test]
+    fn write_config_sections_preserves_unrelated_sections() {
+        let profile = temp_profile_dir();
+        let path = profile.join("config.toml");
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            &path,
+            r#"
+                [appearance]
+                theme = "old"
+
+                [[commands]]
+                id = "keep"
+                label = "Keep"
+                command = "keep.exe"
+            "#,
+        )
+        .unwrap();
+
+        let mut config = VeyraConfig::default();
+        config.general.local_only = true;
+        config.hotkeys.toggle = COPILOT_TOGGLE_HOTKEY.to_string();
+        config.appearance.theme = "dark-compact".to_string();
+        config.appearance.opacity = 0.86;
+        config.appearance.max_results = 14;
+
+        write_config_sections(&path, &config).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let loaded = VeyraConfig::from_toml_str(&raw).unwrap();
+
+        assert!(loaded.general.local_only);
+        assert_eq!(loaded.hotkeys.toggle, COPILOT_TOGGLE_HOTKEY);
+        assert_eq!(loaded.appearance.theme, "dark-compact");
+        assert_eq!(loaded.appearance.max_results, 14);
+        assert!(raw.contains("[[commands]]"));
+        assert!(raw.contains("keep.exe"));
 
         fs::remove_dir_all(&profile).ok();
     }

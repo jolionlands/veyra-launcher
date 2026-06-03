@@ -57,14 +57,15 @@ The primary surface is a centered command palette:
 
 Expected defaults:
 
-- `Alt+Space`: show/hide launcher.
+- `Win+Shift+F23`: show/hide launcher on Copilot-key keyboards.
+- `Alt+Space`: fallback show/hide launcher hotkey.
 - `Enter`: run selected item.
 - `Shift+Enter`: run alternate action.
 - `Ctrl+Enter`: run as admin where supported.
 - `Tab`: accept completion or enter action mode.
-- `Esc`: clear query, then close.
 - `Ctrl+,`: settings.
 - `Ctrl+R`: reload profile and rebuild catalog from profile files.
+- `Esc`: clear the current query, leave settings, or hide the launcher when empty.
 
 ## Settings UI
 
