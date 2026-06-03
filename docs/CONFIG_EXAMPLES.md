@@ -23,8 +23,16 @@ portable/
   commands.toml
   catalogs.toml
   ai.toml
-  plugins.toml
 ```
+
+## Profile Merge Order
+
+Veyra merges files in this order:
+
+1. `config.toml` (full overwrite for general/hotkeys/appearance)
+2. `commands.toml` (append commands and web searches)
+3. `catalogs.toml` (append catalog profiles)
+4. `ai.toml` (AI settings; provider tables can be `[[ai.providers]]` or `[[providers]]`)
 
 ## config.toml
 
@@ -73,6 +81,23 @@ label = "GitHub Code"
 url = "https://github.com/search?q={query}&type=code"
 ```
 
+## catalogs.toml
+
+```toml
+[[catalogs]]
+id = "dev"
+label = "Development"
+paths = ["%USERPROFILE%\\Development", "C:/Work"]
+include_patterns = ["*.md", "*.toml"]
+exclude_patterns = ["**\\node_modules\\**"]
+recursive = true
+follow_symlinks = false
+max_depth = 6
+enabled = true
+```
+
+`catalogs.toml` also accepts `[[profiles]]` as an alias for `[[catalogs]]`.
+
 ## ai.toml
 
 ```toml
@@ -94,4 +119,3 @@ timeout_ms = 60000
 supports_streaming = true
 supports_tools = true
 ```
-

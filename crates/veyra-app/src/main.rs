@@ -8,7 +8,7 @@ use veyra_core::config::{CommandEntry, VeyraConfig, WebSearchEntry};
 use veyra_core::{
     Action, ActionKind, CatalogItem, ItemCategory, SearchResult, search, seed_catalog,
 };
-use veyra_platform::{discover_path_executables, execute_action, profile_dir};
+use veyra_platform::{discover_platform_catalog_items, execute_action, profile_dir};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -38,6 +38,7 @@ struct VeyraApp {
     config: VeyraConfig,
     load_messages: Vec<String>,
     path_item_count: usize,
+    start_menu_item_count: usize,
 }
 
 impl VeyraApp {
@@ -45,10 +46,19 @@ impl VeyraApp {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         let profile_dir = profile_dir("Veyra");
         let (config, mut loaded_items, mut load_messages) = load_profile(&profile_dir);
-        let path_items = discover_path_executables();
-        let path_item_count = path_items.len();
-        load_messages.push(format!("Discovered {path_item_count} PATH executables"));
-        loaded_items.extend(path_items);
+        let platform_items = discover_platform_catalog_items();
+        let path_item_count = platform_items
+            .iter()
+            .filter(|item| item.source == "path")
+            .count();
+        let start_menu_item_count = platform_items
+            .iter()
+            .filter(|item| item.source == "start_menu")
+            .count();
+        load_messages.push(format!(
+            "Discovered {path_item_count} PATH executables and {start_menu_item_count} Start Menu shortcuts"
+        ));
+        loaded_items.extend(platform_items);
         let mut catalog = seed_catalog();
         catalog.extend(loaded_items);
 
@@ -63,6 +73,7 @@ impl VeyraApp {
             config,
             load_messages,
             path_item_count,
+            start_menu_item_count,
         }
     }
 
@@ -294,8 +305,12 @@ impl VeyraApp {
             }
             SettingsPage::Catalogs => {
                 setting_row(ui, "Total catalog items", self.catalog.len().to_string());
-                setting_row(ui, "Start Menu", "Planned");
                 setting_row(ui, "PATH executables", self.path_item_count.to_string());
+                setting_row(
+                    ui,
+                    "Start Menu shortcuts",
+                    self.start_menu_item_count.to_string(),
+                );
                 setting_row(ui, "File profiles", "Planned");
             }
             SettingsPage::Commands => {

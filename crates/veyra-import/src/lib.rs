@@ -1,6 +1,96 @@
 use std::collections::HashMap;
+use std::fmt;
+use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use veyra_core::config::{CommandEntry, WebSearchEntry};
+
+const APPS_INI_CANDIDATES: [&str; 4] = [
+    "Profile/User/Apps.ini",
+    "Profile/User/apps.ini",
+    "Apps.ini",
+    "apps.ini",
+];
+const WEB_SEARCH_INI_CANDIDATES: [&str; 4] = [
+    "Profile/User/WebSearch.ini",
+    "Profile/User/websearch.ini",
+    "WebSearch.ini",
+    "websearch.ini",
+];
+
+#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+pub struct ImportedProfile {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CommandEntry>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub web_search: Vec<WebSearchEntry>,
+}
+
+impl ImportedProfile {
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty() && self.web_search.is_empty()
+    }
+
+    pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
+        toml::to_string_pretty(self)
+    }
+}
+
+#[derive(Debug)]
+pub enum ImportError {
+    SourceNotFound(PathBuf),
+    ReadFile {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+}
+
+impl fmt::Display for ImportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ImportError::SourceNotFound(path) => {
+                write!(
+                    formatter,
+                    "source profile does not exist: {}",
+                    path.display()
+                )
+            }
+            ImportError::ReadFile { path, source } => {
+                write!(formatter, "could not read {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ImportError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ImportError::SourceNotFound(_) => None,
+            ImportError::ReadFile { source, .. } => Some(source),
+        }
+    }
+}
+
+pub fn import_keypirinha_profile(
+    source_root: impl AsRef<Path>,
+) -> Result<ImportedProfile, ImportError> {
+    let source_root = source_root.as_ref();
+    if !source_root.exists() {
+        return Err(ImportError::SourceNotFound(source_root.to_path_buf()));
+    }
+
+    let commands = read_first_existing(source_root, &APPS_INI_CANDIDATES)?
+        .map(parse_apps_ini)
+        .unwrap_or_default();
+    let web_search = read_first_existing(source_root, &WEB_SEARCH_INI_CANDIDATES)?
+        .map(parse_websearch_ini)
+        .unwrap_or_default();
+
+    Ok(ImportedProfile {
+        commands,
+        web_search,
+    })
+}
 
 #[derive(Debug)]
 struct ParsedSection {
@@ -60,12 +150,30 @@ pub fn parse_websearch_ini(input: impl AsRef<str>) -> Vec<WebSearchEntry> {
         .collect()
 }
 
+fn read_first_existing(
+    source_root: &Path,
+    candidates: &[&str],
+) -> Result<Option<String>, ImportError> {
+    for candidate in candidates {
+        let path = source_root.join(candidate);
+        if !path.exists() {
+            continue;
+        }
+
+        return std::fs::read_to_string(&path)
+            .map(Some)
+            .map_err(|source| ImportError::ReadFile { path, source });
+    }
+
+    Ok(None)
+}
+
 fn parse_ini_sections(input: &str) -> Vec<ParsedSection> {
     let mut sections = Vec::new();
     let mut current: Option<ParsedSection> = None;
 
     for line in input.lines() {
-        let trimmed = line.trim();
+        let trimmed = line.trim_start_matches('\u{feff}').trim();
 
         if trimmed.is_empty() {
             continue;
@@ -278,6 +386,7 @@ fn split_command_args(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use veyra_core::config::VeyraConfig;
 
     #[test]
     fn parses_command_sections_with_defaults_and_aliases() {
@@ -336,6 +445,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_bom_prefixed_ini_files() {
+        let input = "\u{feff}[cmd/Display]\nlabel = Display Settings\ncommand = explorer.exe\n";
+
+        let commands = parse_apps_ini(input);
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].id, "Display");
+        assert_eq!(commands[0].command, "explorer.exe");
+    }
+
+    #[test]
     fn parses_web_search_sections_and_keeps_query_template() {
         let input = r#"
             [site/gh]
@@ -364,5 +484,54 @@ mod tests {
         assert_eq!(sites[1].id, "ddg");
         assert_eq!(sites[1].label, "DuckDuckGo");
         assert_eq!(sites[1].url, "https://duckduckgo.com/?q={query}&ia=web");
+    }
+
+    #[test]
+    fn imports_keypirinha_profile_from_standard_layout() {
+        let root = temp_source_dir();
+        let profile = root.join("Profile").join("User");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::write(
+            profile.join("Apps.ini"),
+            r#"
+                [cmd/Display]
+                item_label = Display Settings
+                command = explorer.exe
+                args = ms-settings:display
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            profile.join("WebSearch.ini"),
+            r#"
+                [site/gh]
+                label = GitHub
+                url = https://github.com/search?q=%s
+            "#,
+        )
+        .unwrap();
+
+        let imported = import_keypirinha_profile(&root).unwrap();
+        assert_eq!(imported.commands.len(), 1);
+        assert_eq!(imported.web_search.len(), 1);
+
+        let toml = imported.to_toml_string().unwrap();
+        let config = VeyraConfig::from_toml_str(&toml).unwrap();
+        assert_eq!(config.commands[0].label, "Display Settings");
+        assert_eq!(config.web_search[0].alias, "gh");
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    fn temp_source_dir() -> std::path::PathBuf {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        path.push(format!("veyra-import-test-{nanos}"));
+        path
     }
 }

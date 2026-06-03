@@ -2,7 +2,7 @@
 
 Veyra is a native keyboard launcher and AI command surface for Windows and Linux. It is designed to be fast like Keypirinha, discoverable like Flow Launcher, and portable across Windows/Linux x64 and ARM64 without Electron.
 
-Current status: early workspace skeleton.
+Current status: early workspace skeleton with a working profile loader and catalog seed pipeline.
 
 ## Goals
 
@@ -26,11 +26,47 @@ crates/
 docs/
 ```
 
+## Profile Layout
+
+Config is loaded from:
+
+- Windows: `%APPDATA%\Veyra`
+- Linux: `~/.config/veyra`
+- Portable: `./portable/` beside the executable
+
+Supported profile files (all optional):
+
+- `config.toml` - startup, hotkeys, appearance
+- `commands.toml` - commands and web search entries
+- `catalogs.toml` - file catalog profiles (currently loaded, not yet fully surfaced)
+- `ai.toml` - AI section and provider config
+
+## PATH Catalog Behavior
+
+- Veyra scans `PATH` directories and adds executable files at startup.
+- On Windows, files are filtered by `PATHEXT` (or default executable suffixes); on Linux/macOS, files must be executable.
+- Items are deduplicated by normalized executable name and canonical path; first match wins.
+- Windows also enumerates Start Menu shortcuts (`.lnk`) as app items and deduplicates against PATH items.
+
 ## Run
 
 ```powershell
 cargo run -p veyra-app
 ```
+
+## Import Existing Commands
+
+```powershell
+cargo run -p veyra-import -- keypirinha --source C:\Tools\Keypirinha --dry-run
+cargo run -p veyra-import -- keypirinha --source C:\Tools\Keypirinha --profile "$env:APPDATA\Veyra" --force
+```
+
+## Next-Step Usage
+
+1. Edit files under the active profile (or `portable/`).
+2. Run `cargo run -p veyra-app`.
+3. Open launcher with `Alt+Space`, search profile items, then run with `Enter`.
+4. Open settings (`Ctrl+,`) and review `Diagnostics` for loaded/missing profile files.
 
 ## Check
 

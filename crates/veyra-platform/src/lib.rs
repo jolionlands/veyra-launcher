@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use std::collections::VecDeque;
 use std::process::Command;
 use std::{
     collections::HashSet,
@@ -52,55 +54,70 @@ pub fn profile_dir(app_name: &str) -> PathBuf {
     }
 }
 
-pub fn discover_path_executables() -> Vec<CatalogItem> {
-    let path_dirs = split_path_entries();
-    if path_dirs.is_empty() {
-        return Vec::new();
-    }
-
-    let extensions = executable_extensions();
+pub fn discover_platform_catalog_items() -> Vec<CatalogItem> {
     let mut seen_by_path = HashSet::new();
     let mut seen_by_name = HashSet::new();
+    let mut items = discover_path_executables_with_seen(&mut seen_by_name, &mut seen_by_path);
+
+    items.extend(discover_start_menu_shortcuts(
+        &mut seen_by_name,
+        &mut seen_by_path,
+    ));
+
+    items
+}
+
+pub fn discover_path_executables() -> Vec<CatalogItem> {
+    let mut seen_by_path = HashSet::new();
+    let mut seen_by_name = HashSet::new();
+
+    discover_path_executables_with_seen(&mut seen_by_name, &mut seen_by_path)
+}
+
+fn discover_path_executables_with_seen(
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    let path_dirs = split_path_entries();
+    let extensions = executable_extensions();
     let mut items = Vec::new();
 
     for dir in path_dirs {
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !is_executable_file(&path, &extensions) {
+                    continue;
+                }
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if !is_executable_file(&path, &extensions) {
-                continue;
+                let file_name = match path.file_name().and_then(|value| value.to_str()) {
+                    Some(file_name) => file_name,
+                    None => continue,
+                };
+
+                let normalized_name = normalize_executable_name(file_name);
+                if !seen_by_name.insert(normalized_name.clone()) {
+                    continue;
+                }
+
+                let path_key = normalize_path_key(&path);
+                if !seen_by_path.insert(path_key.clone()) {
+                    continue;
+                }
+
+                let command = path.to_string_lossy().to_string();
+                items.push(
+                    CatalogItem::new(
+                        format!("path_executable:{path_key}"),
+                        file_name,
+                        ItemCategory::Command,
+                        "path",
+                    )
+                    .subtitle(command.clone())
+                    .keywords([normalized_name])
+                    .action(Action::launch(command)),
+                );
             }
-
-            let file_name = match path.file_name().and_then(|value| value.to_str()) {
-                Some(file_name) => file_name,
-                None => continue,
-            };
-
-            let normalized_name = normalize_executable_name(file_name);
-            if !seen_by_name.insert(normalized_name.clone()) {
-                continue;
-            }
-
-            let path_key = normalize_path_key(&path);
-            if !seen_by_path.insert(path_key.clone()) {
-                continue;
-            }
-
-            let command = path.to_string_lossy().to_string();
-            items.push(
-                CatalogItem::new(
-                    format!("path_executable:{path_key}"),
-                    file_name,
-                    ItemCategory::Command,
-                    "path",
-                )
-                .subtitle(command.clone())
-                .keywords([normalized_name])
-                .action(Action::launch(command)),
-            );
         }
     }
 
@@ -199,6 +216,110 @@ fn is_executable_file(path: &Path, extensions: &[String]) -> bool {
     };
     let extension = format!(".{}", extension.to_ascii_uppercase());
     extensions.iter().any(|entry| entry == &extension)
+}
+
+#[cfg(windows)]
+fn discover_start_menu_shortcuts(
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    let mut roots = Vec::new();
+
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        roots.push(PathBuf::from(appdata).join(r"Microsoft\Windows\Start Menu\Programs"));
+    }
+    if let Some(program_data) = std::env::var_os("PROGRAMDATA") {
+        roots.push(PathBuf::from(program_data).join(r"Microsoft\Windows\Start Menu\Programs"));
+    }
+
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let mut queue = VecDeque::from([root]);
+        while let Some(dir) = queue.pop_front() {
+            let entries = match fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+
+                if file_type.is_dir() {
+                    queue.push_back(path);
+                    continue;
+                }
+
+                if !file_type.is_file() || !is_shortcut_file(&path) {
+                    continue;
+                }
+
+                let label = match path.file_stem().and_then(|value| value.to_str()) {
+                    Some(file_name) => file_name,
+                    None => continue,
+                };
+                let normalized_name = normalize_executable_name(label);
+
+                if !seen_by_name.insert(normalized_name.clone()) {
+                    continue;
+                }
+
+                let path_key = normalize_path_key(&path);
+                if !seen_by_path.insert(path_key.clone()) {
+                    continue;
+                }
+
+                items.push(
+                    CatalogItem::new(
+                        format!("start_menu_shortcut:{path_key}"),
+                        label,
+                        ItemCategory::App,
+                        "start_menu",
+                    )
+                    .subtitle(path.to_string_lossy().to_string())
+                    .keywords([normalized_name])
+                    .action(shortcut_launch_action(&path)),
+                );
+            }
+        }
+    }
+
+    items
+}
+
+#[cfg(not(windows))]
+fn discover_start_menu_shortcuts(
+    _seen_by_name: &mut HashSet<String>,
+    _seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn is_shortcut_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("lnk"))
+}
+
+#[cfg(windows)]
+fn shortcut_launch_action(path: &Path) -> Action {
+    let shortcut = path.to_string_lossy().to_string();
+    Action {
+        id: "default".to_string(),
+        label: "Open".to_string(),
+        kind: ActionKind::ShellCommand,
+        command: Some("cmd".to_string()),
+        args: vec!["/C".into(), "start".into(), "".into(), shortcut],
+        requires_confirmation: false,
+        run_as_admin: false,
+    }
 }
 
 #[cfg(not(windows))]
@@ -301,8 +422,12 @@ pub enum PlatformError {
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    #[cfg(windows)]
+    use std::path::Path;
     use std::path::PathBuf;
 
+    #[cfg(windows)]
+    use super::{ActionKind, is_shortcut_file, shortcut_launch_action};
     use super::{normalize_executable_name, normalize_path_key, parse_executable_extensions};
 
     #[test]
@@ -356,5 +481,31 @@ mod tests {
         }
 
         assert_eq!(selected.len(), 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn detects_windows_shortcut_file_extension() {
+        assert!(is_shortcut_file(Path::new("Notepad.lnk")));
+        assert!(is_shortcut_file(Path::new("notepad.LNK")));
+        assert!(!is_shortcut_file(Path::new("notepad.exe")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn creates_shell_command_action_for_shortcut() {
+        let action = shortcut_launch_action(Path::new(r"C:\ProgramData\Microsoft\Windows\foo.lnk"));
+
+        assert_eq!(action.command.as_deref(), Some("cmd"));
+        assert_eq!(action.kind, ActionKind::ShellCommand);
+        assert_eq!(
+            action.args,
+            vec![
+                "/C",
+                "start",
+                "",
+                r"C:\ProgramData\Microsoft\Windows\foo.lnk"
+            ]
+        );
     }
 }

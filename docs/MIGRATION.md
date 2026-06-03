@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Veyra should be able to import an existing launcher profile so the user does not need to recreate every command manually.
+Veyra imports legacy launcher profiles into Veyra TOML files so users can keep their existing command setup with minimal manual work.
 
 ## Source Profile
 
@@ -12,45 +12,43 @@ Expected source root:
 <keypirinha-portable-root>
 ```
 
-Important files:
+## Importer Direction
 
-| Source | Destination |
-| --- | --- |
-| `Profile\User\Apps.ini` | `commands.toml` and built-in command catalog |
-| `Profile\User\WebSearch.ini` | `commands.toml` web search entries |
-| `Profile\User\FilesCatalog.ini` | `catalogs.toml` file catalog profiles |
-| `Profile\User\AskAI.ini` | `ai.toml` defaults |
-| `Local\Packages\AskAI\skills` | `tools/askai` migrated tool package |
+- Direction is Keypirinha profile -> Veyra profile.
+- `Profile\User\Apps.ini` and `cmd/<name>` sections map to Veyra `commands`.
+- `Profile\User\WebSearch.ini` and `site/<alias>` sections map to Veyra `web_search`.
+- `Path`/`Files` catalog migration is tracked but not yet wired.
+- AskAI tools and other package assets are not migrated yet.
 
 ## Import Rules
 
-- Preserve command labels.
-- Preserve launch commands.
-- Map `auto_terminal = no` to `terminal = false`.
-- Map terminal defaults conservatively for scripts and console commands.
-- Convert web search aliases into `{query}` URL templates.
-- Convert file catalog filters into include/exclude glob rules.
-- Register migrated AskAI tools as compatibility tools.
-- Never modify or delete the source profile.
+1. Preserve command labels and launch commands.
+2. Parse `auto_terminal`/`terminal` into Veyra `terminal`.
+3. Normalize web search URL tokens to `{query}`.
+4. Emit only transformed TOML content; never modify the source profile.
 
 ## Import Command
 
-```text
-veyra import keypirinha --source <keypirinha-portable-root>
+```powershell
+cargo run -p veyra-import -- keypirinha --source <keypirinha-portable-root> --dry-run
+cargo run -p veyra-import -- keypirinha --source <keypirinha-portable-root> --profile <veyra-profile-dir> --force
 ```
 
-Expected flags:
+Supported flags:
 
-- `--dry-run`: print the generated config without writing.
-- `--profile <path>`: write to a specific Veyra profile.
-- `--copy-tools`: copy tool manifests and runners into the Veyra profile.
-- `--reference-tools`: reference tool manifests in place.
+- `--source <path>`: Keypirinha portable root or folder containing `Apps.ini`/`WebSearch.ini`.
+- `--profile <path>`: Veyra profile directory; writes `commands.toml`.
+- `--output <path>`: exact output file path.
+- `--dry-run`: print generated TOML without writing.
+- `--force`: overwrite an existing output file.
 
-## Acceptance Criteria
+## Import Outputs
 
-- Current custom commands appear in Veyra search.
-- Settings shortcuts open the same OS settings pages.
-- Web search aliases open the same URLs.
-- File catalog profiles index the same folders.
-- Migrated AI tools are visible through the tool router.
+Current Veyra outputs:
 
+- `commands.toml` (`commands` + `web_search`)
+
+Future Veyra outputs:
+
+- `catalogs.toml` (future)
+- `ai.toml` + tool manifests (future)

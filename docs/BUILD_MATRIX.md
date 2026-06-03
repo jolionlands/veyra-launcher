@@ -9,6 +9,13 @@
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | P1 |
 | Linux x64 | `x86_64-unknown-linux-gnu` | P1 |
 
+Current local/build-state target matrix:
+
+- `aarch64-pc-windows-msvc`: supported and documented
+- `x86_64-pc-windows-msvc`: supported and documented
+- `x86_64-unknown-linux-gnu`: supported and documented
+- `aarch64-unknown-linux-gnu`: local `cargo check` passes; CI coverage pending
+
 ## CI Coverage
 
 Current GitHub Actions coverage:
@@ -63,4 +70,4 @@ The repository includes `.github/workflows/release.yml` as a manual release pipe
 
 ARM64 release artifacts can be added when a practical release path is available.
 
-Linux cross-compilation from Windows may require an external linker. CI should use native Linux runners or cross-build containers.
+Cross-compiling Linux/ARM64 from Windows may require a linker toolchain or containerized Linux build.
