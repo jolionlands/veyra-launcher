@@ -8,7 +8,9 @@ use veyra_core::config::{CommandEntry, VeyraConfig, WebSearchEntry};
 use veyra_core::{
     Action, ActionKind, CatalogItem, ItemCategory, SearchResult, search, seed_catalog,
 };
-use veyra_platform::{discover_platform_catalog_items, execute_action, profile_dir};
+use veyra_platform::{
+    discover_file_catalog_items, discover_platform_catalog_items, execute_action, profile_dir,
+};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -39,6 +41,8 @@ struct VeyraApp {
     load_messages: Vec<String>,
     path_item_count: usize,
     start_menu_item_count: usize,
+    file_catalog_item_count: usize,
+    file_catalog_skipped_paths: usize,
 }
 
 impl VeyraApp {
@@ -59,6 +63,19 @@ impl VeyraApp {
             "Discovered {path_item_count} PATH executables and {start_menu_item_count} Start Menu shortcuts"
         ));
         loaded_items.extend(platform_items);
+        let file_catalog = discover_file_catalog_items(&config.catalogs);
+        let file_catalog_item_count = file_catalog.items.len();
+        let file_catalog_skipped_paths = file_catalog.skipped_paths;
+        load_messages.push(format!(
+            "Indexed {file_catalog_item_count} file catalog items from {} enabled profiles",
+            file_catalog.enabled_profiles
+        ));
+        if file_catalog_skipped_paths > 0 {
+            load_messages.push(format!(
+                "Skipped {file_catalog_skipped_paths} missing or unsupported catalog paths"
+            ));
+        }
+        loaded_items.extend(file_catalog.items);
         let mut catalog = seed_catalog();
         catalog.extend(loaded_items);
 
@@ -74,6 +91,8 @@ impl VeyraApp {
             load_messages,
             path_item_count,
             start_menu_item_count,
+            file_catalog_item_count,
+            file_catalog_skipped_paths,
         }
     }
 
@@ -311,7 +330,17 @@ impl VeyraApp {
                     "Start Menu shortcuts",
                     self.start_menu_item_count.to_string(),
                 );
-                setting_row(ui, "File profiles", "Planned");
+                setting_row(ui, "File profiles", self.config.catalogs.len().to_string());
+                setting_row(
+                    ui,
+                    "Indexed files/folders",
+                    self.file_catalog_item_count.to_string(),
+                );
+                setting_row(
+                    ui,
+                    "Skipped catalog paths",
+                    self.file_catalog_skipped_paths.to_string(),
+                );
             }
             SettingsPage::Commands => {
                 setting_row(ui, "User commands", self.config.commands.len().to_string());
@@ -436,7 +465,10 @@ fn merge_config(target: &mut VeyraConfig, mut incoming: VeyraConfig, mode: Confi
         target.web_search.extend(incoming.web_search);
     }
 
-    if matches!(mode, ConfigMergeMode::Full | ConfigMergeMode::CatalogsOnly) {
+    if matches!(
+        mode,
+        ConfigMergeMode::Full | ConfigMergeMode::CommandsOnly | ConfigMergeMode::CatalogsOnly
+    ) {
         target.catalogs.extend(incoming.catalogs);
     }
 
@@ -712,6 +744,36 @@ mod tests {
         assert_eq!(config.catalogs.len(), 1);
         assert!(config.ai.enabled);
         assert_eq!(config.ai.providers.len(), 1);
+
+        fs::remove_dir_all(&profile).ok();
+    }
+
+    #[test]
+    fn commands_file_can_include_imported_catalog_profiles() {
+        let profile = temp_profile_dir();
+        fs::create_dir_all(&profile).unwrap();
+        fs::write(
+            profile.join("commands.toml"),
+            r#"
+                [[commands]]
+                label = "Command: Test"
+                command = "test.exe"
+
+                [[catalogs]]
+                id = "imported"
+                label = "Imported Files"
+                paths = ["C:/Imported"]
+                recursive = true
+            "#,
+        )
+        .unwrap();
+
+        let (config, items, _) = load_profile(&profile);
+
+        assert_eq!(config.commands.len(), 1);
+        assert_eq!(config.catalogs.len(), 1);
+        assert_eq!(config.catalogs[0].id, "imported");
+        assert_eq!(items.len(), 1);
 
         fs::remove_dir_all(&profile).ok();
     }

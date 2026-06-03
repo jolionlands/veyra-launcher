@@ -53,9 +53,10 @@ fn run() -> Result<(), CliError> {
             std::fs::write(&output, toml)?;
 
             println!(
-                "Imported {} commands and {} web searches to {}",
+                "Imported {} commands, {} web searches, and {} catalogs to {}",
                 imported.commands.len(),
                 imported.web_search.len(),
+                imported.catalogs.len(),
                 output.display()
             );
         }

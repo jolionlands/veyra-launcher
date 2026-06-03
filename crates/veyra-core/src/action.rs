@@ -45,6 +45,18 @@ impl Action {
             run_as_admin: false,
         }
     }
+
+    pub fn open_file(path: impl Into<String>) -> Self {
+        Self {
+            id: "open_file".to_string(),
+            label: "Open".to_string(),
+            kind: ActionKind::OpenFile,
+            command: Some(path.into()),
+            args: Vec::new(),
+            requires_confirmation: false,
+            run_as_admin: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

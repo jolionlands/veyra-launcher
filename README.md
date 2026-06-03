@@ -2,14 +2,14 @@
 
 Veyra is a native keyboard launcher and AI command surface for Windows and Linux. It is designed to be fast like Keypirinha, discoverable like Flow Launcher, and portable across Windows/Linux x64 and ARM64 without Electron.
 
-Current status: early workspace skeleton with a working profile loader and catalog seed pipeline.
+Current status: early workspace skeleton with a working profile loader, command/web-search/catalog import, and startup catalog indexing.
 
 ## Goals
 
 - Native Rust app with a polished command palette.
 - Cross-compilable for Windows ARM64, Windows x64, Linux ARM64, and Linux x64.
 - Local-first AI provider and tool routing.
-- Built-in settings, system tools, web search, file catalogs, and command migration.
+- Built-in settings, system tools, web search, file catalog profiles, and command migration.
 - Acrylic/glass visual direction on Windows where supported.
 - External plugin protocol over JSON-RPC stdio.
 
@@ -38,15 +38,18 @@ Supported profile files (all optional):
 
 - `config.toml` - startup, hotkeys, appearance
 - `commands.toml` - commands and web search entries
-- `catalogs.toml` - file catalog profiles (currently loaded, not yet fully surfaced)
+- `catalogs.toml` - file catalog profiles
 - `ai.toml` - AI section and provider config
 
-## PATH Catalog Behavior
+## Catalog Sources at Startup
 
-- Veyra scans `PATH` directories and adds executable files at startup.
-- On Windows, files are filtered by `PATHEXT` (or default executable suffixes); on Linux/macOS, files must be executable.
+- Veyra scans startup sources and appends discovered items to the catalog:
+  - PATH executables
+  - Windows Start Menu shortcuts (`.lnk`)
+  - enabled file catalog profiles from `catalogs.toml` or imported `commands.toml`
+- On Windows, executables are filtered by `PATHEXT` (or default suffixes); on Linux/macOS, files must be executable.
 - Items are deduplicated by normalized executable name and canonical path; first match wins.
-- Windows also enumerates Start Menu shortcuts (`.lnk`) as app items and deduplicates against PATH items.
+- File catalogs honor `recursive`, `max_depth`, `include_patterns`, `exclude_patterns`, and `follow_symlinks`.
 
 ## Run
 
@@ -54,7 +57,7 @@ Supported profile files (all optional):
 cargo run -p veyra-app
 ```
 
-## Import Existing Commands
+## Import Existing Profile
 
 ```powershell
 cargo run -p veyra-import -- keypirinha --source C:\Tools\Keypirinha --dry-run
@@ -71,7 +74,7 @@ cargo run -p veyra-import -- keypirinha --source C:\Tools\Keypirinha --profile "
 ## Check
 
 ```powershell
-cargo fmt --check
+cargo fmt --all --check
 cargo test --workspace
 cargo check --workspace
 ```

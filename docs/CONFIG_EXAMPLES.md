@@ -30,7 +30,7 @@ portable/
 Veyra merges files in this order:
 
 1. `config.toml` (full overwrite for general/hotkeys/appearance)
-2. `commands.toml` (append commands and web searches)
+2. `commands.toml` (append commands, web searches, and importer-emitted catalog profiles)
 3. `catalogs.toml` (append catalog profiles)
 4. `ai.toml` (AI settings; provider tables can be `[[ai.providers]]` or `[[providers]]`)
 
@@ -97,6 +97,8 @@ enabled = true
 ```
 
 `catalogs.toml` also accepts `[[profiles]]` as an alias for `[[catalogs]]`.
+
+Enabled profiles are indexed at startup. File and folder items open through the platform shell.
 
 ## ai.toml
 
