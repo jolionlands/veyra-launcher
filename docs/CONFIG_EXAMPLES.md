@@ -67,7 +67,7 @@ max_results = 10
 show_preview = true
 ```
 
-`Win+Shift+F23` is the Copilot-key chord used by many Windows keyboards. Veyra also registers `Alt+Space` as a fallback toggle even when the configured toggle is different.
+`Win+Shift+F23` is the Copilot-key chord used by many Windows keyboards. Veyra also registers `Alt+Space` as a fallback toggle even when the configured toggle is different. On Windows, the running app installs a low-level Copilot-key hook so the shell does not take that chord first.
 
 ## commands.toml
 

@@ -1,5 +1,10 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::path::{Path, PathBuf};
 use std::{fs, io, sync::mpsc, thread};
+
+#[cfg(windows)]
+use std::{sync::OnceLock, time::Duration};
 
 use eframe::egui::{
     self, Align, Color32, FontId, Frame, Key, Layout, Margin, RichText, ScrollArea, Slider, Stroke,
@@ -13,6 +18,21 @@ use veyra_core::{
 };
 use veyra_platform::{
     discover_file_catalog_items, discover_platform_catalog_items, execute_action, profile_dir,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::{LPARAM, LRESULT, WPARAM},
+    UI::{
+        Input::KeyboardAndMouse::{
+            GetAsyncKeyState, VK_F23, VK_LSHIFT, VK_LWIN, VK_RSHIFT, VK_RWIN, VK_SHIFT,
+        },
+        WindowsAndMessaging::{
+            CallNextHookEx, DispatchMessageW, GetMessageW, HC_ACTION, KBDLLHOOKSTRUCT, MSG,
+            SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_KEYDOWN,
+            WM_SYSKEYDOWN,
+        },
+    },
 };
 
 fn main() -> eframe::Result<()> {
@@ -214,13 +234,14 @@ impl VeyraApp {
     }
 
     fn process_global_hotkey_events(&mut self, ctx: &egui::Context) {
-        let toggle_requested = self
+        let global_toggle_requested = self
             .hotkeys
             .events
             .try_iter()
             .any(|event| self.hotkeys.is_toggle_event(event));
+        let copilot_toggle_requested = self.hotkeys.copilot_events.try_iter().next().is_some();
 
-        if toggle_requested {
+        if global_toggle_requested || copilot_toggle_requested {
             self.toggle_launcher_window(ctx);
         }
     }
@@ -806,21 +827,30 @@ struct HotkeyRuntime {
     toggle_hotkey_ids: Vec<u32>,
     registered_labels: Vec<String>,
     events: mpsc::Receiver<GlobalHotKeyEvent>,
+    copilot_events: mpsc::Receiver<()>,
+    copilot_hook_registered: bool,
 }
 
 impl HotkeyRuntime {
     fn new(ctx: &egui::Context) -> Self {
+        let (copilot_sender, copilot_events) = mpsc::channel();
+        let copilot_hook_registered = spawn_copilot_keyboard_hook(ctx, copilot_sender);
         Self {
             manager: GlobalHotKeyManager::new().ok(),
             registered_hotkeys: Vec::new(),
             toggle_hotkey_ids: Vec::new(),
             registered_labels: Vec::new(),
             events: spawn_global_hotkey_event_pump(ctx),
+            copilot_events,
+            copilot_hook_registered,
         }
     }
 
     fn register_toggle_hotkeys(&mut self, config: &VeyraConfig) -> Vec<String> {
         let mut messages = Vec::new();
+        if self.copilot_hook_registered {
+            messages.push("Installed Windows Copilot key low-level hook".to_string());
+        }
         let Some(manager) = &self.manager else {
             messages.push("Global hotkeys unavailable on this session".to_string());
             return messages;
@@ -867,15 +897,20 @@ impl HotkeyRuntime {
     }
 
     fn registered_labels(&self) -> String {
-        if self.registered_labels.is_empty() {
+        let mut labels = self.registered_labels.clone();
+        if self.copilot_hook_registered {
+            labels.push(COPILOT_HOOK_LABEL.to_string());
+        }
+
+        if labels.is_empty() {
             "None".to_string()
         } else {
-            self.registered_labels.join(", ")
+            labels.join(", ")
         }
     }
 
     fn has_registered_toggle(&self) -> bool {
-        !self.toggle_hotkey_ids.is_empty()
+        self.copilot_hook_registered || !self.toggle_hotkey_ids.is_empty()
     }
 }
 
@@ -893,6 +928,95 @@ fn spawn_global_hotkey_event_pump(ctx: &egui::Context) -> mpsc::Receiver<GlobalH
     receiver
 }
 
+#[cfg(windows)]
+struct CopilotHookSink {
+    sender: mpsc::Sender<()>,
+    ctx: egui::Context,
+}
+
+#[cfg(windows)]
+static COPILOT_HOOK_SINK: OnceLock<CopilotHookSink> = OnceLock::new();
+
+#[cfg(windows)]
+fn spawn_copilot_keyboard_hook(ctx: &egui::Context, sender: mpsc::Sender<()>) -> bool {
+    let _ = COPILOT_HOOK_SINK.set(CopilotHookSink {
+        sender,
+        ctx: ctx.clone(),
+    });
+
+    let (ready_sender, ready_receiver) = mpsc::channel();
+    thread::spawn(move || unsafe {
+        let hook = SetWindowsHookExW(
+            WH_KEYBOARD_LL,
+            Some(copilot_keyboard_proc),
+            std::ptr::null_mut(),
+            0,
+        );
+        let _ = ready_sender.send(!hook.is_null());
+        if hook.is_null() {
+            return;
+        }
+
+        let mut message = std::mem::zeroed::<MSG>();
+        while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+
+        UnhookWindowsHookEx(hook);
+    });
+
+    ready_receiver
+        .recv_timeout(Duration::from_millis(750))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn spawn_copilot_keyboard_hook(_ctx: &egui::Context, _sender: mpsc::Sender<()>) -> bool {
+    false
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn copilot_keyboard_proc(
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if code == HC_ACTION as i32 && is_key_down_message(wparam) {
+        let keyboard = unsafe { *(lparam as *const KBDLLHOOKSTRUCT) };
+        if keyboard.vkCode == u32::from(VK_F23) && win_shift_down() {
+            if let Some(sink) = COPILOT_HOOK_SINK.get() {
+                let _ = sink.sender.send(());
+                sink.ctx.request_repaint();
+            }
+            return 1;
+        }
+    }
+
+    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+}
+
+#[cfg(windows)]
+fn is_key_down_message(wparam: WPARAM) -> bool {
+    wparam == WM_KEYDOWN as WPARAM || wparam == WM_SYSKEYDOWN as WPARAM
+}
+
+#[cfg(windows)]
+fn win_shift_down() -> bool {
+    (key_down(VK_LWIN) || key_down(VK_RWIN)) && shift_down()
+}
+
+#[cfg(windows)]
+fn shift_down() -> bool {
+    key_down(VK_SHIFT) || key_down(VK_LSHIFT) || key_down(VK_RSHIFT)
+}
+
+#[cfg(windows)]
+fn key_down(key: u16) -> bool {
+    unsafe { GetAsyncKeyState(i32::from(key)) & i16::MIN != 0 }
+}
+
+const COPILOT_HOOK_LABEL: &str = "Copilot hook";
 const COPILOT_TOGGLE_HOTKEY: &str = "Win+Shift+F23";
 const FALLBACK_TOGGLE_HOTKEY: &str = "Alt+Space";
 

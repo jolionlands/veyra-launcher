@@ -59,6 +59,7 @@ Expected defaults:
 
 - `Win+Shift+F23`: show/hide launcher on Copilot-key keyboards.
 - `Alt+Space`: fallback show/hide launcher hotkey.
+- Windows builds should hook the Copilot chord while running and suppress console windows for spawned commands.
 - `Enter`: run selected item.
 - `Shift+Enter`: run alternate action.
 - `Ctrl+Enter`: run as admin where supported.

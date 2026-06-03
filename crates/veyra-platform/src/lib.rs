@@ -11,9 +11,15 @@ use veyra_core::config::CatalogProfile;
 use veyra_core::{Action, ActionKind, CatalogItem, ItemCategory};
 
 #[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+#[cfg(windows)]
 const WINDOWS_DEFAULT_PATHEXT: [&str; 11] = [
     ".COM", ".EXE", ".BAT", ".CMD", ".VBS", ".VBE", ".JS", ".JSE", ".WSF", ".WSH", ".MSC",
 ];
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -700,14 +706,10 @@ fn spawn_command(action: &Action) -> Result<(), PlatformError> {
         .as_deref()
         .ok_or(PlatformError::MissingCommand)?;
 
-    Command::new(command)
-        .args(&action.args)
-        .spawn()
-        .map(|_| ())
-        .map_err(|source| PlatformError::SpawnFailed {
-            command: command.to_string(),
-            source,
-        })
+    let mut process = Command::new(command);
+    process.args(&action.args);
+
+    spawn_without_console(process, command)
 }
 
 fn open_url(url: &str) -> Result<(), PlatformError> {
@@ -719,7 +721,7 @@ fn open_path(path: &str) -> Result<(), PlatformError> {
 }
 
 fn open_with_system_handler(target: &str) -> Result<(), PlatformError> {
-    let mut command = if cfg!(target_os = "windows") {
+    let command = if cfg!(target_os = "windows") {
         let mut command = Command::new("cmd");
         command.args(["/C", "start", "", target]);
         command
@@ -733,14 +735,28 @@ fn open_with_system_handler(target: &str) -> Result<(), PlatformError> {
         command
     };
 
+    spawn_without_console(command, target)
+}
+
+fn spawn_without_console(mut command: Command, command_label: &str) -> Result<(), PlatformError> {
+    suppress_console_window(&mut command);
+
     command
         .spawn()
         .map(|_| ())
         .map_err(|source| PlatformError::SpawnFailed {
-            command: target.to_string(),
+            command: command_label.to_string(),
             source,
         })
 }
+
+#[cfg(windows)]
+fn suppress_console_window(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn suppress_console_window(_command: &mut Command) {}
 
 #[derive(Debug, Error)]
 pub enum PlatformError {

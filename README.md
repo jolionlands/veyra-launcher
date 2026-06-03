@@ -59,7 +59,7 @@ Catalogs are rebuilt from the same startup scan path when profile reload is requ
 - `Reload profile` on the General or Diagnostics settings pages.
 - `Refresh catalogs` on the Catalogs settings page.
 
-The launcher registers `Win+Shift+F23` for Copilot-key keyboards and keeps `Alt+Space` as a fallback global toggle.
+The launcher registers `Win+Shift+F23` for Copilot-key keyboards and keeps `Alt+Space` as a fallback global toggle. On Windows, Veyra also installs a low-level Copilot-key hook while it is running so the shell does not take the key first. GUI builds use the Windows subsystem, and spawned commands are started without a console window.
 
 ## Run
 
