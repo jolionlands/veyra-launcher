@@ -1,8 +1,8 @@
 use eframe::egui::{
     self, Align, Color32, Frame, Key, Layout, Margin, RichText, Stroke, TextEdit, Vec2,
 };
-use veyra_core::{CatalogItem, SearchResult, search, seed_catalog};
-use veyra_platform::profile_dir;
+use veyra_core::{Action, ActionKind, CatalogItem, SearchResult, search, seed_catalog};
+use veyra_platform::{execute_action, profile_dir};
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -25,7 +25,9 @@ struct VeyraApp {
     query: String,
     catalog: Vec<CatalogItem>,
     show_settings: bool,
+    settings_page: SettingsPage,
     selected: usize,
+    last_status: Option<String>,
 }
 
 impl VeyraApp {
@@ -35,7 +37,9 @@ impl VeyraApp {
             query: String::new(),
             catalog: seed_catalog(),
             show_settings: false,
+            settings_page: SettingsPage::General,
             selected: 0,
+            last_status: None,
         }
     }
 
@@ -115,16 +119,25 @@ impl VeyraApp {
         if ui.input(|input| input.key_pressed(Key::ArrowUp)) && !results.is_empty() {
             self.selected = self.selected.saturating_sub(1);
         }
+        if ui.input(|input| input.key_pressed(Key::Enter))
+            && let Some(result) = results.get(self.selected)
+        {
+            self.execute_result(result);
+        }
 
         for (index, result) in results.iter().take(10).enumerate() {
             self.render_result(ui, index, result);
         }
 
         ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-            ui.label(
-                RichText::new("Ctrl+, settings    Esc clear/close")
-                    .color(Color32::from_rgb(140, 148, 160)),
-            );
+            if let Some(status) = &self.last_status {
+                ui.label(RichText::new(status).color(Color32::from_rgb(180, 190, 205)));
+            } else {
+                ui.label(
+                    RichText::new("Enter open    Ctrl+, settings    Esc clear/close")
+                        .color(Color32::from_rgb(140, 148, 160)),
+                );
+            }
         });
     }
 
@@ -136,7 +149,7 @@ impl VeyraApp {
             Color32::from_rgba_unmultiplied(255, 255, 255, 12)
         };
 
-        Frame::new()
+        let response = Frame::new()
             .fill(fill)
             .corner_radius(6)
             .inner_margin(Margin::symmetric(12, 9))
@@ -158,8 +171,43 @@ impl VeyraApp {
                         );
                     });
                 });
-            });
+            })
+            .response;
+
+        if response.clicked() {
+            self.selected = index;
+        }
+        if response.double_clicked() {
+            self.execute_result(result);
+        }
         ui.add_space(6.0);
+    }
+
+    fn execute_result(&mut self, result: &SearchResult) {
+        let Some(action) = result.item.actions.first() else {
+            self.last_status = Some(format!("No action registered for {}", result.item.label));
+            return;
+        };
+
+        let action = self.resolve_action(action);
+        match execute_action(&action) {
+            Ok(()) => {
+                self.last_status = Some(format!("Opened {}", result.item.label));
+            }
+            Err(error) => {
+                self.last_status = Some(format!("Could not open {}: {}", result.item.label, error));
+            }
+        }
+    }
+
+    fn resolve_action(&self, action: &Action) -> Action {
+        let mut action = action.clone();
+        if action.kind == ActionKind::OpenUrl
+            && let Some(command) = &action.command
+        {
+            action.command = Some(command.replace("{query}", &encode_query(&self.query)));
+        }
+        action
     }
 
     fn render_settings(&mut self, ui: &mut egui::Ui) {
@@ -168,33 +216,137 @@ impl VeyraApp {
                 ui.set_width(190.0);
                 ui.heading("Settings");
                 ui.separator();
-                for item in [
-                    "General",
-                    "Appearance",
-                    "Hotkeys",
-                    "Catalogs",
-                    "Commands",
-                    "AI Providers",
-                    "Tools",
-                    "Diagnostics",
-                ] {
-                    let _ = ui.selectable_label(item == "General", item);
+                for page in SettingsPage::ALL {
+                    if ui
+                        .selectable_label(self.settings_page == page, page.label())
+                        .clicked()
+                    {
+                        self.settings_page = page;
+                    }
                 }
             });
 
             ui.separator();
 
             ui.vertical(|ui| {
-                ui.heading("General");
-                ui.add_space(8.0);
-                setting_row(ui, "Profile", profile_dir("Veyra").display().to_string());
-                setting_row(ui, "Startup", "Planned");
-                setting_row(ui, "Global hotkey", "Alt+Space");
-                setting_row(ui, "Local-only AI mode", "Available in provider settings");
-                setting_row(ui, "External plugins", "JSON-RPC over stdio");
+                self.render_settings_page(ui);
             });
         });
     }
+
+    fn render_settings_page(&self, ui: &mut egui::Ui) {
+        ui.heading(self.settings_page.label());
+        ui.add_space(8.0);
+
+        match self.settings_page {
+            SettingsPage::General => {
+                setting_row(ui, "Profile", profile_dir("Veyra").display().to_string());
+                setting_row(ui, "Startup", "Planned");
+                setting_row(ui, "History limit", "5000");
+                setting_row(ui, "Portable mode", "Auto-detect");
+            }
+            SettingsPage::Appearance => {
+                setting_row(ui, "Theme", "Dark acrylic");
+                setting_row(ui, "Opacity", "92%");
+                setting_row(ui, "Blur", "Enabled where supported");
+                setting_row(ui, "Preview pane", "Planned");
+            }
+            SettingsPage::Hotkeys => {
+                setting_row(ui, "Toggle launcher", "Alt+Space");
+                setting_row(ui, "Settings", "Ctrl+,");
+                setting_row(ui, "Alternate action", "Shift+Enter");
+                setting_row(ui, "Elevated action", "Ctrl+Enter");
+            }
+            SettingsPage::Catalogs => {
+                setting_row(ui, "Built-in seed items", self.catalog.len().to_string());
+                setting_row(ui, "Start Menu", "Planned");
+                setting_row(ui, "PATH executables", "Planned");
+                setting_row(ui, "File profiles", "Planned");
+            }
+            SettingsPage::Commands => {
+                setting_row(ui, "User commands", "Planned");
+                setting_row(ui, "Web shortcuts", "Seeded");
+                setting_row(ui, "Action confirmation", "Per command");
+            }
+            SettingsPage::AiProviders => {
+                setting_row(ui, "Default provider", "Not configured");
+                setting_row(ui, "Local-only mode", "Available");
+                setting_row(ui, "Tool calling", "Manifest based");
+            }
+            SettingsPage::Tools => {
+                setting_row(ui, "Tool manifests", "JSON");
+                setting_row(ui, "External runner", "Process");
+                setting_row(ui, "Confirmation", "Safety based");
+            }
+            SettingsPage::Diagnostics => {
+                setting_row(
+                    ui,
+                    "Last action",
+                    self.last_status.as_deref().unwrap_or("None"),
+                );
+                setting_row(
+                    ui,
+                    "Platform",
+                    format!("{:?}", veyra_platform::current_platform()),
+                );
+                setting_row(ui, "Catalog items", self.catalog.len().to_string());
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SettingsPage {
+    General,
+    Appearance,
+    Hotkeys,
+    Catalogs,
+    Commands,
+    AiProviders,
+    Tools,
+    Diagnostics,
+}
+
+impl SettingsPage {
+    const ALL: [SettingsPage; 8] = [
+        SettingsPage::General,
+        SettingsPage::Appearance,
+        SettingsPage::Hotkeys,
+        SettingsPage::Catalogs,
+        SettingsPage::Commands,
+        SettingsPage::AiProviders,
+        SettingsPage::Tools,
+        SettingsPage::Diagnostics,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            SettingsPage::General => "General",
+            SettingsPage::Appearance => "Appearance",
+            SettingsPage::Hotkeys => "Hotkeys",
+            SettingsPage::Catalogs => "Catalogs",
+            SettingsPage::Commands => "Commands",
+            SettingsPage::AiProviders => "AI Providers",
+            SettingsPage::Tools => "Tools",
+            SettingsPage::Diagnostics => "Diagnostics",
+        }
+    }
+}
+
+fn encode_query(query: &str) -> String {
+    query
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![byte as char]
+            }
+            b' ' => vec!['+'],
+            _ => {
+                let hex = format!("%{byte:02X}");
+                hex.chars().collect()
+            }
+        })
+        .collect()
 }
 
 fn category_label(item: &CatalogItem) -> &'static str {

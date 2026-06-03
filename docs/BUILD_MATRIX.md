@@ -9,6 +9,16 @@
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | P1 |
 | Linux x64 | `x86_64-unknown-linux-gnu` | P1 |
 
+## CI Coverage
+
+Current GitHub Actions coverage:
+
+- `x86_64-pc-windows-msvc` on `windows-latest` (build + check)
+- `aarch64-pc-windows-msvc` on `windows-latest` (build + check)
+- `x86_64-unknown-linux-gnu` on `ubuntu-latest` (build + check)
+
+`aarch64-unknown-linux-gnu` is not yet in CI, because the repository only uses GitHub-hosted Linux/x64 runners. Add an ARM64 Linux runner or container strategy when that coverage is needed.
+
 ## Local Target Setup
 
 ```powershell
@@ -44,5 +54,13 @@ Linux x64:
 cargo build --release --target x86_64-unknown-linux-gnu -p veyra-app
 ```
 
-Linux cross-compilation from Windows may require an external linker. CI should use native Linux runners or cross-build containers.
+## Manual Release Workflow
 
+The repository includes `.github/workflows/release.yml` as a manual release pipeline (`workflow_dispatch`) that currently publishes:
+
+- `veyra-launcher-windows-x64.zip`
+- `veyra-launcher-linux-x64.tar.gz`
+
+ARM64 release artifacts can be added when a practical release path is available.
+
+Linux cross-compilation from Windows may require an external linker. CI should use native Linux runners or cross-build containers.

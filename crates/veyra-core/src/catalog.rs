@@ -96,7 +96,10 @@ pub fn seed_catalog() -> Vec<CatalogItem> {
         )
         .subtitle("Open display and resolution settings")
         .keywords(["display", "monitor", "resolution", "settings"])
-        .action(Action::launch("explorer.exe ms-settings:display"))
+        .action(Action::launch_with_args(
+            "explorer.exe",
+            ["ms-settings:display"],
+        ))
         .score_boost(25),
         CatalogItem::new(
             "settings.sound",
@@ -106,7 +109,10 @@ pub fn seed_catalog() -> Vec<CatalogItem> {
         )
         .subtitle("Open sound settings")
         .keywords(["audio", "speaker", "microphone", "settings"])
-        .action(Action::launch("explorer.exe ms-settings:sound")),
+        .action(Action::launch_with_args(
+            "explorer.exe",
+            ["ms-settings:sound"],
+        )),
         CatalogItem::new(
             "system.task_manager",
             "System: Task Manager",

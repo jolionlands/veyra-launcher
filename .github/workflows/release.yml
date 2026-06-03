@@ -1,0 +1,61 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-package:
+    name: Package (${{ matrix.name }})
+    runs-on: ${{ matrix.runs-on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            runs-on: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: veyra-app.exe
+            archive: veyra-launcher-windows-x64.zip
+          - name: linux-x64
+            runs-on: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: veyra-app
+            archive: veyra-launcher-linux-x64.tar.gz
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} -p veyra-app
+      - name: Prepare dist directory
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force dist | Out-Null
+      - name: Prepare dist directory
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+      - name: Package release artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $binary = "target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if (-not (Test-Path $binary)) {
+            throw "Missing artifact: $binary"
+          }
+          Compress-Archive -Path $binary -DestinationPath "dist/${{ matrix.archive }}" -Force
+      - name: Package release artifact (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
+          if [ ! -f "$binary" ]; then
+            echo "Missing artifact: $binary"
+            exit 1
+          fi
+          tar -czf "dist/${{ matrix.archive }}" -C "target/${{ matrix.target }}/release" "${{ matrix.binary }}"
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.archive }}

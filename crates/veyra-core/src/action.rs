@@ -16,12 +16,19 @@ pub struct Action {
 
 impl Action {
     pub fn launch(command: impl Into<String>) -> Self {
+        Self::launch_with_args(command, Vec::<String>::new())
+    }
+
+    pub fn launch_with_args(
+        command: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         Self {
             id: "default".to_string(),
             label: "Open".to_string(),
             kind: ActionKind::Launch,
             command: Some(command.into()),
-            args: Vec::new(),
+            args: args.into_iter().map(Into::into).collect(),
             requires_confirmation: false,
             run_as_admin: false,
         }

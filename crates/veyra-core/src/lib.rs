@@ -1,5 +1,6 @@
 pub mod action;
 pub mod catalog;
+pub mod config;
 pub mod search;
 
 pub use action::{Action, ActionKind};

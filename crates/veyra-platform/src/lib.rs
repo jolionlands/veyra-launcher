@@ -1,4 +1,8 @@
 use std::path::PathBuf;
+use std::process::Command;
+
+use thiserror::Error;
+use veyra_core::{Action, ActionKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -43,4 +47,75 @@ fn portable_profile_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let portable = exe.parent()?.join("portable");
     portable.is_dir().then_some(portable)
+}
+
+pub fn execute_action(action: &Action) -> Result<(), PlatformError> {
+    match action.kind {
+        ActionKind::Launch | ActionKind::ShellCommand | ActionKind::OpenFile => {
+            spawn_command(action)
+        }
+        ActionKind::OpenUrl => {
+            let url = action
+                .command
+                .as_deref()
+                .ok_or(PlatformError::MissingCommand)?;
+            open_url(url)
+        }
+        ActionKind::AiPrompt | ActionKind::ToolCall => Err(PlatformError::UnsupportedAction {
+            kind: format!("{:?}", action.kind),
+        }),
+    }
+}
+
+fn spawn_command(action: &Action) -> Result<(), PlatformError> {
+    let command = action
+        .command
+        .as_deref()
+        .ok_or(PlatformError::MissingCommand)?;
+
+    Command::new(command)
+        .args(&action.args)
+        .spawn()
+        .map(|_| ())
+        .map_err(|source| PlatformError::SpawnFailed {
+            command: command.to_string(),
+            source,
+        })
+}
+
+fn open_url(url: &str) -> Result<(), PlatformError> {
+    let mut command = if cfg!(target_os = "windows") {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    } else if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|source| PlatformError::SpawnFailed {
+            command: url.to_string(),
+            source,
+        })
+}
+
+#[derive(Debug, Error)]
+pub enum PlatformError {
+    #[error("action has no command")]
+    MissingCommand,
+    #[error("unsupported action kind: {kind}")]
+    UnsupportedAction { kind: String },
+    #[error("failed to spawn `{command}`")]
+    SpawnFailed {
+        command: String,
+        source: std::io::Error,
+    },
 }
