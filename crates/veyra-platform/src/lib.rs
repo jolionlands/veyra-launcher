@@ -4,11 +4,26 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use veyra_core::config::CatalogProfile;
 use veyra_core::{Action, ActionKind, CatalogItem, ItemCategory};
+
+#[cfg(windows)]
+mod aurora;
+#[cfg(windows)]
+pub use aurora::send_aurora_ipc_message;
+
+#[cfg(windows)]
+use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::{SEE_MASK_DEFAULT, SHELLEXECUTEINFOW, ShellExecuteExW};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -60,15 +75,145 @@ pub fn profile_dir(app_name: &str) -> PathBuf {
     }
 }
 
-pub fn discover_platform_catalog_items() -> Vec<CatalogItem> {
-    let mut seen_by_path = HashSet::new();
-    let mut seen_by_name = HashSet::new();
-    let mut items = discover_path_executables_with_seen(&mut seen_by_name, &mut seen_by_path);
+const PLATFORM_CACHE_FILE_NAME: &str = "platform_catalog_cache.json";
+const CACHE_VERSION: u32 = 1;
 
-    items.extend(discover_start_menu_shortcuts(
+/// Default time-to-live for the platform catalog cache in seconds.
+pub const PLATFORM_CACHE_DEFAULT_TTL_SECONDS: u64 = 3600;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PlatformCatalogCache {
+    version: u32,
+    generated_at: u64,
+    items: Vec<CatalogItem>,
+}
+
+pub fn load_cached_platform_catalog_items(profile_dir: &Path) -> Vec<CatalogItem> {
+    let path = profile_dir.join(PLATFORM_CACHE_FILE_NAME);
+    let Ok(raw) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+
+    let cache: PlatformCatalogCache = match serde_json::from_str(&raw) {
+        Ok(cache) => cache,
+        Err(_) => return Vec::new(),
+    };
+
+    if cache.version != CACHE_VERSION {
+        return Vec::new();
+    }
+
+    cache.items
+}
+
+/// Returns the `generated_at` timestamp (Unix seconds) of a valid cache, if one exists.
+pub fn platform_cache_generated_at(profile_dir: &Path) -> Option<u64> {
+    let path = profile_dir.join(PLATFORM_CACHE_FILE_NAME);
+    let raw = fs::read_to_string(&path).ok()?;
+    let cache: PlatformCatalogCache = serde_json::from_str(&raw).ok()?;
+    if cache.version != CACHE_VERSION {
+        return None;
+    }
+    Some(cache.generated_at)
+}
+
+/// Returns `true` if a valid cache exists and is no older than `ttl_seconds`.
+pub fn is_platform_cache_fresh(profile_dir: &Path, ttl_seconds: u64) -> bool {
+    let Some(generated_at) = platform_cache_generated_at(profile_dir) else {
+        return false;
+    };
+    let now = unix_timestamp();
+    now.saturating_sub(generated_at) < ttl_seconds
+}
+
+/// Loads cached platform catalog items only when the cache exists, is valid, and is fresh.
+pub fn load_fresh_cached_platform_catalog_items(
+    profile_dir: &Path,
+    ttl_seconds: u64,
+) -> Option<Vec<CatalogItem>> {
+    if !is_platform_cache_fresh(profile_dir, ttl_seconds) {
+        return None;
+    }
+    let items = load_cached_platform_catalog_items(profile_dir);
+    if items.is_empty() {
+        return None;
+    }
+    Some(items)
+}
+
+pub fn save_cached_platform_catalog_items(
+    profile_dir: &Path,
+    items: &[CatalogItem],
+) -> Result<(), PlatformError> {
+    let path = profile_dir.join(PLATFORM_CACHE_FILE_NAME);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| PlatformError::CacheWriteFailed {
+            path: path.clone(),
+            source,
+        })?;
+    }
+
+    let cache = PlatformCatalogCache {
+        version: CACHE_VERSION,
+        generated_at: unix_timestamp(),
+        items: items.to_vec(),
+    };
+
+    let raw = serde_json::to_string_pretty(&cache).map_err(|source| {
+        PlatformError::CacheSerializeFailed {
+            path: path.clone(),
+            source,
+        }
+    })?;
+
+    fs::write(&path, raw).map_err(|source| PlatformError::CacheWriteFailed {
+        path: path.clone(),
+        source,
+    })
+}
+
+fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
+pub fn discover_platform_catalog_items() -> Vec<CatalogItem> {
+    let mut seen_by_name = HashSet::new();
+    let mut seen_by_path = HashSet::new();
+    let mut items = Vec::new();
+
+    items.extend(discover_path_executables_with_seen(
         &mut seen_by_name,
         &mut seen_by_path,
     ));
+
+    #[cfg(windows)]
+    {
+        items.extend(discover_app_paths_registry(
+            &mut seen_by_name,
+            &mut seen_by_path,
+        ));
+        items.extend(discover_program_files(&mut seen_by_name, &mut seen_by_path));
+        items.extend(discover_windows_apps(&mut seen_by_name, &mut seen_by_path));
+        items.extend(discover_desktop_shortcuts(
+            &mut seen_by_name,
+            &mut seen_by_path,
+        ));
+        items.extend(discover_start_menu_shortcuts(
+            &mut seen_by_name,
+            &mut seen_by_path,
+        ));
+    }
+
+    #[cfg(not(windows))]
+    {
+        items.extend(discover_start_menu_shortcuts(
+            &mut seen_by_name,
+            &mut seen_by_path,
+        ));
+    }
 
     items
 }
@@ -415,36 +560,13 @@ fn discover_path_executables_with_seen(
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if !is_executable_file(&path, &extensions) {
-                    continue;
-                }
-
-                let file_name = match path.file_name().and_then(|value| value.to_str()) {
-                    Some(file_name) => file_name,
-                    None => continue,
-                };
-
-                let normalized_name = normalize_executable_name(file_name);
-                if !seen_by_name.insert(normalized_name.clone()) {
-                    continue;
-                }
-
-                let path_key = normalize_path_key(&path);
-                if !seen_by_path.insert(path_key.clone()) {
-                    continue;
-                }
-
-                let command = path.to_string_lossy().to_string();
-                items.push(
-                    CatalogItem::new(
-                        format!("path_executable:{path_key}"),
-                        file_name,
-                        ItemCategory::Command,
-                        "path",
-                    )
-                    .subtitle(command.clone())
-                    .keywords([normalized_name])
-                    .action(Action::launch(command)),
+                add_executable_item_with_extensions(
+                    &path,
+                    "path",
+                    seen_by_name,
+                    seen_by_path,
+                    &extensions,
+                    &mut items,
                 );
             }
         }
@@ -457,10 +579,201 @@ fn split_path_entries() -> Vec<PathBuf> {
     std::env::var_os("PATH")
         .map(|path| {
             std::env::split_paths(&path)
+                .map(|entry| expand_path(&entry.to_string_lossy()))
                 .filter(|entry| entry.is_dir())
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default()
+}
+
+fn add_executable_item_with_extensions(
+    path: &Path,
+    source: &str,
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+    extensions: &[String],
+    items: &mut Vec<CatalogItem>,
+) -> bool {
+    if !is_executable_file(path, extensions) {
+        return false;
+    }
+
+    let file_name = match path.file_name().and_then(|value| value.to_str()) {
+        Some(file_name) => file_name,
+        None => return false,
+    };
+
+    let normalized_name = normalize_executable_name(file_name);
+    if !seen_by_name.insert(normalized_name.clone()) {
+        return false;
+    }
+
+    let path_key = normalize_path_key(path);
+    if !seen_by_path.insert(path_key.clone()) {
+        return false;
+    }
+
+    let command = path.to_string_lossy().to_string();
+    items.push(
+        CatalogItem::new(
+            format!("{source}:{path_key}"),
+            file_name,
+            ItemCategory::Command,
+            source,
+        )
+        .subtitle(command.clone())
+        .keywords([normalized_name])
+        .action(Action::launch(command)),
+    );
+    true
+}
+
+#[cfg(windows)]
+fn discover_app_paths_registry(
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    let extensions = executable_extensions();
+
+    for root in [LOCAL_MACHINE, CURRENT_USER] {
+        let Ok(key) = root.open(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths") else {
+            continue;
+        };
+        for name in key.keys().into_iter().flatten() {
+            if !name.to_ascii_lowercase().ends_with(".exe") {
+                continue;
+            }
+            let Ok(subkey) = key.open(&name) else {
+                continue;
+            };
+            let Ok(target) = subkey.get_string("") else {
+                continue;
+            };
+            let path = PathBuf::from(target);
+            add_executable_item_with_extensions(
+                &path,
+                "app_paths",
+                seen_by_name,
+                seen_by_path,
+                &extensions,
+                &mut items,
+            );
+        }
+    }
+
+    items
+}
+
+#[cfg(windows)]
+fn discover_program_files(
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    let mut roots = Vec::new();
+
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        roots.push(PathBuf::from(program_files));
+    }
+    if let Some(program_files_x86) = std::env::var_os("ProgramFiles(x86)") {
+        roots.push(PathBuf::from(program_files_x86));
+    }
+
+    let extensions = executable_extensions();
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        scan_program_files_dir(
+            &root,
+            1,
+            seen_by_name,
+            seen_by_path,
+            &extensions,
+            &mut items,
+        );
+    }
+
+    items
+}
+
+#[cfg(windows)]
+fn scan_program_files_dir(
+    dir: &Path,
+    depth_remaining: u32,
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+    extensions: &[String],
+    items: &mut Vec<CatalogItem>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+
+        if metadata.is_file() {
+            add_executable_item_with_extensions(
+                &path,
+                "program_files",
+                seen_by_name,
+                seen_by_path,
+                extensions,
+                items,
+            );
+        } else if metadata.is_dir() && depth_remaining > 0 {
+            scan_program_files_dir(
+                &path,
+                depth_remaining - 1,
+                seen_by_name,
+                seen_by_path,
+                extensions,
+                items,
+            );
+        }
+    }
+}
+
+#[cfg(windows)]
+fn discover_windows_apps(
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") else {
+        return items;
+    };
+
+    let root = PathBuf::from(local_app_data)
+        .join("Microsoft")
+        .join("WindowsApps");
+    if !root.is_dir() {
+        return items;
+    }
+
+    let extensions = executable_extensions();
+    let Ok(entries) = fs::read_dir(&root) else {
+        return items;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        add_executable_item_with_extensions(
+            &path,
+            "windows_apps",
+            seen_by_name,
+            seen_by_path,
+            &extensions,
+            &mut items,
+        );
+    }
+
+    items
 }
 
 fn executable_extensions() -> Vec<String> {
@@ -548,6 +861,30 @@ fn is_executable_file(path: &Path, extensions: &[String]) -> bool {
 }
 
 #[cfg(windows)]
+fn discover_desktop_shortcuts(
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+) -> Vec<CatalogItem> {
+    let mut items = Vec::new();
+    let Some(user_profile) = std::env::var_os("USERPROFILE") else {
+        return items;
+    };
+
+    let root = PathBuf::from(user_profile).join("Desktop");
+    if root.is_dir() {
+        scan_shortcut_dir(
+            &root,
+            "desktop_shortcut",
+            seen_by_name,
+            seen_by_path,
+            &mut items,
+        );
+    }
+
+    items
+}
+
+#[cfg(windows)]
 fn discover_start_menu_shortcuts(
     seen_by_name: &mut HashSet<String>,
     seen_by_path: &mut HashSet<String>,
@@ -563,63 +900,151 @@ fn discover_start_menu_shortcuts(
     }
 
     for root in roots {
-        if !root.is_dir() {
-            continue;
-        }
-        let mut queue = VecDeque::from([root]);
-        while let Some(dir) = queue.pop_front() {
-            let entries = match fs::read_dir(&dir) {
-                Ok(entries) => entries,
-                Err(_) => continue,
-            };
-
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let file_type = match entry.file_type() {
-                    Ok(file_type) => file_type,
-                    Err(_) => continue,
-                };
-
-                if file_type.is_dir() {
-                    queue.push_back(path);
-                    continue;
-                }
-
-                if !file_type.is_file() || !is_shortcut_file(&path) {
-                    continue;
-                }
-
-                let label = match path.file_stem().and_then(|value| value.to_str()) {
-                    Some(file_name) => file_name,
-                    None => continue,
-                };
-                let normalized_name = normalize_executable_name(label);
-
-                if !seen_by_name.insert(normalized_name.clone()) {
-                    continue;
-                }
-
-                let path_key = normalize_path_key(&path);
-                if !seen_by_path.insert(path_key.clone()) {
-                    continue;
-                }
-
-                items.push(
-                    CatalogItem::new(
-                        format!("start_menu_shortcut:{path_key}"),
-                        label,
-                        ItemCategory::App,
-                        "start_menu",
-                    )
-                    .subtitle(path.to_string_lossy().to_string())
-                    .keywords([normalized_name])
-                    .action(shortcut_launch_action(&path)),
-                );
-            }
+        if root.is_dir() {
+            scan_shortcut_dir(
+                &root,
+                "start_menu_shortcut",
+                seen_by_name,
+                seen_by_path,
+                &mut items,
+            );
         }
     }
 
     items
+}
+
+#[cfg(windows)]
+fn scan_shortcut_dir(
+    root: &Path,
+    source: &str,
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+    items: &mut Vec<CatalogItem>,
+) {
+    let mut queue = VecDeque::from([root.to_path_buf()]);
+
+    while let Some(dir) = queue.pop_front() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+
+            if file_type.is_dir() {
+                queue.push_back(path);
+                continue;
+            }
+
+            if !file_type.is_file() || !is_shortcut_file(&path) {
+                continue;
+            }
+
+            add_shortcut_item(&path, source, seen_by_name, seen_by_path, items);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn add_shortcut_item(
+    path: &Path,
+    source: &str,
+    seen_by_name: &mut HashSet<String>,
+    seen_by_path: &mut HashSet<String>,
+    items: &mut Vec<CatalogItem>,
+) -> bool {
+    let label = match path.file_stem().and_then(|value| value.to_str()) {
+        Some(file_name) => file_name,
+        None => return false,
+    };
+    let normalized_name = normalize_executable_name(label);
+
+    if !seen_by_name.insert(normalized_name.clone()) {
+        return false;
+    }
+
+    let path_key = normalize_path_key(path);
+    if !seen_by_path.insert(path_key.clone()) {
+        return false;
+    }
+
+    let keywords = shortcut_keywords(label, &normalized_name);
+    items.push(
+        CatalogItem::new(
+            format!("{source}:{path_key}"),
+            label,
+            ItemCategory::App,
+            source,
+        )
+        .subtitle(path.to_string_lossy().to_string())
+        .keywords(keywords)
+        .action(shortcut_launch_action(path)),
+    );
+    true
+}
+
+#[cfg(windows)]
+fn shortcut_keywords(label: &str, normalized_name: &str) -> Vec<String> {
+    let mut keywords = vec![normalized_name.to_string()];
+    let lower = label.to_ascii_lowercase();
+
+    let aliases: &[(&str, &[&str])] = &[
+        ("visual studio code", &["vscode", "vs code"]),
+        (
+            "visual studio code insiders",
+            &["code insiders", "vscode insiders"],
+        ),
+        ("visual studio", &["vs", "ide"]),
+        ("cursor", &["ai code", "cursor editor"]),
+        ("windsurf", &["windsurf editor"]),
+        ("windows terminal", &["wt"]),
+        ("microsoft edge", &["edge"]),
+        ("google chrome", &["chrome"]),
+        ("mozilla firefox", &["firefox"]),
+        ("brave", &["brave", "browser"]),
+        ("opera", &["opera", "browser"]),
+        ("command prompt", &["cmd", "command"]),
+        ("file explorer", &["explorer", "files"]),
+        ("task manager", &["taskmgr"]),
+        ("microsoft outlook", &["mail", "email", "outlook"]),
+        ("microsoft teams", &["teams", "chat"]),
+        ("microsoft onenote", &["onenote", "notes"]),
+        ("microsoft word", &["word", "doc"]),
+        ("microsoft excel", &["excel", "sheet", "spreadsheet"]),
+        (
+            "microsoft powerpoint",
+            &["powerpoint", "ppt", "presentation"],
+        ),
+        ("slack", &["slack", "chat"]),
+        ("discord", &["discord", "chat"]),
+        ("zoom", &["zoom", "meeting"]),
+        ("spotify", &["spotify", "music"]),
+        ("whatsapp", &["whatsapp", "chat"]),
+        ("telegram", &["telegram", "tg"]),
+        ("postman", &["api", "postman"]),
+        ("docker desktop", &["docker"]),
+        ("obsidian", &["obsidian", "vault"]),
+        ("notion", &["notion", "notes", "wiki"]),
+        ("steam", &["steam", "games"]),
+    ];
+
+    for (pattern, extras) in aliases {
+        if lower.contains(pattern) {
+            for extra in *extras {
+                if !keywords.iter().any(|kw| kw == *extra) {
+                    keywords.push(extra.to_string());
+                }
+            }
+        }
+    }
+
+    keywords
 }
 
 #[cfg(not(windows))]
@@ -678,6 +1103,14 @@ fn portable_profile_dir() -> Option<PathBuf> {
 }
 
 pub fn execute_action(action: &Action) -> Result<(), PlatformError> {
+    if action.run_as_admin {
+        let command = action
+            .command
+            .as_deref()
+            .ok_or(PlatformError::MissingCommand)?;
+        return spawn_elevated(command, &action.args);
+    }
+
     match action.kind {
         ActionKind::Launch | ActionKind::ShellCommand => spawn_command(action),
         ActionKind::OpenFile => {
@@ -697,6 +1130,36 @@ pub fn execute_action(action: &Action) -> Result<(), PlatformError> {
         ActionKind::AiPrompt | ActionKind::ToolCall => Err(PlatformError::UnsupportedAction {
             kind: format!("{:?}", action.kind),
         }),
+        ActionKind::AuroraIpc => {
+            #[cfg(windows)]
+            {
+                let request = action
+                    .command
+                    .as_deref()
+                    .ok_or(PlatformError::MissingCommand)?;
+                let response = send_aurora_ipc_message(request)?;
+                // The daemon replies {"success":true,"result":…} or
+                // {"success":false,"error":…}. Surface daemon-side failures
+                // ("Invalid message: …", "runtime not yet initialised") in the
+                // UI instead of discarding them.
+                match serde_json::from_str::<serde_json::Value>(&response) {
+                    Ok(value) if value.get("success").and_then(|s| s.as_bool()) == Some(false) => {
+                        let message = value
+                            .get("error")
+                            .and_then(|e| e.as_str())
+                            .unwrap_or("unknown daemon error");
+                        Err(PlatformError::AuroraIpcFailed {
+                            message: message.to_string(),
+                        })
+                    }
+                    _ => Ok(()),
+                }
+            }
+            #[cfg(not(windows))]
+            Err(PlatformError::UnsupportedAction {
+                kind: "aurora_ipc".to_string(),
+            })
+        }
     }
 }
 
@@ -710,6 +1173,56 @@ fn spawn_command(action: &Action) -> Result<(), PlatformError> {
     process.args(&action.args);
 
     spawn_without_console(process, command)
+}
+
+#[cfg(windows)]
+fn spawn_elevated(command: &str, args: &[String]) -> Result<(), PlatformError> {
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let file: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
+    let params: Vec<u16> = args
+        .join(" ")
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_DEFAULT,
+        hwnd: std::ptr::null_mut(),
+        lpVerb: verb.as_ptr(),
+        lpFile: file.as_ptr(),
+        lpParameters: if args.is_empty() {
+            std::ptr::null()
+        } else {
+            params.as_ptr()
+        },
+        lpDirectory: std::ptr::null(),
+        nShow: SW_SHOWNORMAL,
+        hInstApp: std::ptr::null_mut(),
+        lpIDList: std::ptr::null_mut(),
+        lpClass: std::ptr::null(),
+        hkeyClass: std::ptr::null_mut(),
+        dwHotKey: 0,
+        Anonymous: unsafe { std::mem::zeroed() },
+        hProcess: std::ptr::null_mut(),
+    };
+
+    unsafe {
+        if ShellExecuteExW(&mut info) == 0 {
+            return Err(PlatformError::ElevationFailed {
+                command: command.to_string(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn spawn_elevated(_command: &str, _args: &[String]) -> Result<(), PlatformError> {
+    Err(PlatformError::ElevationFailed {
+        command: _command.to_string(),
+    })
 }
 
 fn open_url(url: &str) -> Result<(), PlatformError> {
@@ -769,6 +1282,20 @@ pub enum PlatformError {
         command: String,
         source: std::io::Error,
     },
+    #[error("failed to elevate `{command}`")]
+    ElevationFailed { command: String },
+    #[error("failed to write cache to {path}")]
+    CacheWriteFailed {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to serialize cache for {path}")]
+    CacheSerializeFailed {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[error("Aurora IPC failed: {message}")]
+    AuroraIpcFailed { message: String },
 }
 
 #[cfg(test)]
@@ -779,14 +1306,16 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        catalog_path_matches, discover_file_catalog_items, expand_dollar_env, expand_percent_env,
+        add_executable_item_with_extensions, catalog_path_matches, discover_file_catalog_items,
+        expand_dollar_env, expand_percent_env, is_platform_cache_fresh,
+        load_cached_platform_catalog_items, load_fresh_cached_platform_catalog_items,
         normalize_executable_name, normalize_path_key, parse_executable_extensions,
-        wildcard_matches,
+        save_cached_platform_catalog_items, wildcard_matches,
     };
     #[cfg(windows)]
     use super::{is_shortcut_file, shortcut_launch_action};
     use veyra_core::config::CatalogProfile;
-    use veyra_core::{ActionKind, ItemCategory};
+    use veyra_core::{ActionKind, CatalogItem, ItemCategory};
 
     #[test]
     fn parses_pathext_with_case_and_spaces() {
@@ -959,6 +1488,137 @@ mod tests {
                 r"C:\ProgramData\Microsoft\Windows\foo.lnk"
             ]
         );
+    }
+
+    #[test]
+    fn add_executable_item_builds_launch_action() {
+        let root = temp_catalog_dir();
+        let exe = root.join("myapp.exe");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        let mut seen_by_name = HashSet::new();
+        let mut seen_by_path = HashSet::new();
+        let mut items = Vec::new();
+        let extensions = vec![".EXE".to_string()];
+
+        assert!(add_executable_item_with_extensions(
+            &exe,
+            "test",
+            &mut seen_by_name,
+            &mut seen_by_path,
+            &extensions,
+            &mut items,
+        ));
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "myapp.exe");
+        assert_eq!(items[0].source, "test");
+        assert!(!items[0].actions.is_empty());
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn add_executable_item_dedupes_by_name_and_path() {
+        let root = temp_catalog_dir();
+        let exe = root.join("myapp.exe");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&exe, b"").unwrap();
+
+        let mut seen_by_name = HashSet::new();
+        let mut seen_by_path = HashSet::new();
+        let mut items = Vec::new();
+        let extensions = vec![".EXE".to_string()];
+
+        assert!(add_executable_item_with_extensions(
+            &exe,
+            "test",
+            &mut seen_by_name,
+            &mut seen_by_path,
+            &extensions,
+            &mut items,
+        ));
+        assert!(!add_executable_item_with_extensions(
+            &exe,
+            "test",
+            &mut seen_by_name,
+            &mut seen_by_path,
+            &extensions,
+            &mut items,
+        ));
+        assert_eq!(items.len(), 1);
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn saves_and_loads_platform_cache_round_trip() {
+        let dir = temp_profile_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let items = vec![CatalogItem::new(
+            "test:app.exe",
+            "app.exe",
+            ItemCategory::App,
+            "test",
+        )];
+        save_cached_platform_catalog_items(&dir, &items).unwrap();
+        let loaded = load_cached_platform_catalog_items(&dir);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "test:app.exe");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn fresh_cache_is_fresh_within_ttl() {
+        let dir = temp_profile_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let items = vec![CatalogItem::new(
+            "test:app.exe",
+            "app.exe",
+            ItemCategory::App,
+            "test",
+        )];
+        save_cached_platform_catalog_items(&dir, &items).unwrap();
+        assert!(is_platform_cache_fresh(&dir, 3600));
+        assert!(!is_platform_cache_fresh(&dir, 0));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_fresh_cache_honors_ttl() {
+        let dir = temp_profile_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let items = vec![CatalogItem::new(
+            "test:app.exe",
+            "app.exe",
+            ItemCategory::App,
+            "test",
+        )];
+        save_cached_platform_catalog_items(&dir, &items).unwrap();
+        assert!(load_fresh_cached_platform_catalog_items(&dir, 3600).is_some());
+        assert!(load_fresh_cached_platform_catalog_items(&dir, 0).is_none());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn invalid_cache_version_returns_empty_items() {
+        let dir = temp_profile_dir();
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(super::PLATFORM_CACHE_FILE_NAME);
+        fs::write(&path, r#"{"version":999,"generated_at":0,"items":[]}"#).unwrap();
+        assert!(load_cached_platform_catalog_items(&dir).is_empty());
+        assert!(!is_platform_cache_fresh(&dir, 3600));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    fn temp_profile_dir() -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        path.push(format!("veyra-platform-cache-test-{nanos}"));
+        path
     }
 
     fn temp_catalog_dir() -> PathBuf {

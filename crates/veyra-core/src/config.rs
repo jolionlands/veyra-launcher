@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -13,12 +15,16 @@ pub struct VeyraConfig {
     pub commands: Vec<CommandEntry>,
     #[serde(default)]
     pub web_search: Vec<WebSearchEntry>,
+    #[serde(default)]
+    pub plugins: Vec<PluginEntry>,
     #[serde(default, alias = "profiles")]
     pub catalogs: Vec<CatalogProfile>,
     #[serde(default)]
     pub ai: AiConfig,
     #[serde(default, skip_serializing)]
     pub providers: Vec<AiProvider>,
+    #[serde(default)]
+    pub snippets: Vec<SnippetEntry>,
 }
 
 impl VeyraConfig {
@@ -121,6 +127,61 @@ pub struct WebSearchEntry {
     pub url: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct SnippetEntry {
+    pub id: String,
+    pub label: String,
+    pub keyword: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PluginEntry {
+    pub id: String,
+    pub label: String,
+    pub description: String,
+    #[serde(default)]
+    pub kind: PluginKind,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_plugin_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default)]
+    pub requires_confirmation: bool,
+}
+
+impl Default for PluginEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            label: String::new(),
+            description: String::new(),
+            kind: PluginKind::Process,
+            command: String::new(),
+            args: Vec::new(),
+            keywords: Vec::new(),
+            enabled: true,
+            timeout_ms: default_plugin_timeout_ms(),
+            requires_confirmation: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginKind {
+    #[default]
+    Process,
+    JsonRpcStdio,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CatalogProfile {
@@ -190,8 +251,16 @@ impl Default for AiConfig {
 pub struct AiProvider {
     pub id: String,
     pub label: String,
+    #[serde(default)]
+    pub kind: AiProviderKind,
     pub base_url: String,
     pub model: String,
+    #[serde(default)]
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub keep_warm: bool,
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub local_only: bool,
@@ -203,6 +272,20 @@ pub struct AiProvider {
     pub supports_streaming: bool,
     #[serde(default)]
     pub supports_tools: bool,
+    #[serde(default)]
+    pub context_limit_tokens: Option<usize>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub prompt_template: Option<String>,
+    #[serde(default)]
+    pub stop_tokens: Vec<String>,
+    #[serde(default)]
+    pub ready_marker: Option<String>,
+    #[serde(default)]
+    pub turn_marker: Option<String>,
+    #[serde(default)]
+    pub context_overflow_markers: Vec<String>,
 }
 
 impl Default for AiProvider {
@@ -210,16 +293,35 @@ impl Default for AiProvider {
         Self {
             id: String::new(),
             label: String::new(),
+            kind: AiProviderKind::OpenAiCompatible,
             base_url: String::new(),
             model: String::new(),
+            command: String::new(),
+            args: Vec::new(),
+            keep_warm: false,
             api_key_env: None,
             local_only: false,
             enabled: true,
             timeout_ms: default_ai_timeout_ms(),
             supports_streaming: false,
             supports_tools: false,
+            context_limit_tokens: None,
+            env: HashMap::new(),
+            prompt_template: None,
+            stop_tokens: Vec::new(),
+            ready_marker: None,
+            turn_marker: None,
+            context_overflow_markers: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AiProviderKind {
+    #[default]
+    OpenAiCompatible,
+    Process,
 }
 
 fn default_startup() -> bool {
@@ -247,7 +349,7 @@ fn default_theme() -> String {
 }
 
 fn default_opacity() -> f32 {
-    0.92
+    0.72
 }
 
 fn default_font_size() -> u32 {
@@ -264,6 +366,10 @@ fn default_ai_provider() -> String {
 
 fn default_ai_timeout_ms() -> u64 {
     60_000
+}
+
+fn default_plugin_timeout_ms() -> u64 {
+    5_000
 }
 
 #[cfg(test)]
@@ -284,7 +390,7 @@ mod tests {
 
             [appearance]
             theme = "dark-acrylic"
-            opacity = 0.92
+            opacity = 0.72
             blur = true
             font_size = 15
             max_results = 10
@@ -299,7 +405,7 @@ mod tests {
         assert_eq!(config.hotkeys.toggle, "Alt+Space");
         assert_eq!(config.hotkeys.settings, "Ctrl+,");
         assert_eq!(config.appearance.theme, "dark-acrylic");
-        assert_eq!(config.appearance.opacity, 0.92);
+        assert_eq!(config.appearance.opacity, 0.72);
         assert!(config.appearance.blur);
         assert_eq!(config.appearance.font_size, 15);
         assert_eq!(config.appearance.max_results, 10);
@@ -359,6 +465,7 @@ mod tests {
             [[ai.providers]]
             id = "local"
             label = "Local OpenAI-compatible"
+            kind = "open_ai_compatible"
             base_url = "http://127.0.0.1:8080/v1"
             model = "local-model"
             api_key_env = ""
@@ -375,7 +482,38 @@ mod tests {
         assert_eq!(config.ai.default_provider, "local");
         assert_eq!(config.ai.providers.len(), 1);
         assert_eq!(config.ai.providers[0].id, "local");
+        assert_eq!(
+            config.ai.providers[0].kind,
+            AiProviderKind::OpenAiCompatible
+        );
         assert!(config.ai.providers[0].supports_tools);
+    }
+
+    #[test]
+    fn parses_process_ai_provider() {
+        let value = r#"
+            [ai]
+            enabled = true
+            default_provider = "minicpm5_npu"
+
+            [[providers]]
+            id = "minicpm5_npu"
+            label = "MiniCPM5 NPU"
+            kind = "process"
+            command = "npu_chat.exe"
+            args = ["C:/models/minicpm5"]
+            keep_warm = true
+            model = "openbmb/MiniCPM5-1B"
+            local_only = true
+        "#;
+
+        let config = VeyraConfig::from_toml_str(value).unwrap();
+
+        assert_eq!(config.providers.len(), 1);
+        assert_eq!(config.providers[0].kind, AiProviderKind::Process);
+        assert_eq!(config.providers[0].command, "npu_chat.exe");
+        assert_eq!(config.providers[0].args, vec!["C:/models/minicpm5"]);
+        assert!(config.providers[0].keep_warm);
     }
 
     #[test]
@@ -424,9 +562,33 @@ mod tests {
         assert_eq!(config.appearance.theme, "dark-acrylic");
         assert!(config.commands.is_empty());
         assert!(config.web_search.is_empty());
+        assert!(config.plugins.is_empty());
         assert!(config.catalogs.is_empty());
         assert_eq!(config.ai.default_provider, "local");
         assert_eq!(config.ai.providers.len(), 0);
         assert!(config.providers.is_empty());
+    }
+
+    #[test]
+    fn parses_plugins_toml() {
+        let value = r#"
+            [[plugins]]
+            id = "kyrphina.ask"
+            label = "Kyrphina: Ask"
+            description = "Send a prompt to Kyrphina"
+            command = "powershell.exe"
+            args = ["-NoProfile", "-File", "panel/chat_panel.ps1"]
+            keywords = ["ai", "assistant", "kyrphina"]
+            enabled = true
+        "#;
+
+        let config = VeyraConfig::from_toml_str(value).unwrap();
+
+        assert_eq!(config.plugins.len(), 1);
+        assert_eq!(config.plugins[0].id, "kyrphina.ask");
+        assert_eq!(config.plugins[0].args[2], "panel/chat_panel.ps1");
+        assert!(config.plugins[0].enabled);
+        assert_eq!(config.plugins[0].kind, PluginKind::Process);
+        assert_eq!(config.plugins[0].timeout_ms, 5_000);
     }
 }

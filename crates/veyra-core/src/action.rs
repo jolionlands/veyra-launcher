@@ -57,6 +57,18 @@ impl Action {
             run_as_admin: false,
         }
     }
+
+    pub fn ai_prompt() -> Self {
+        Self {
+            id: "ai_prompt".to_string(),
+            label: "Ask AI".to_string(),
+            kind: ActionKind::AiPrompt,
+            command: None,
+            args: Vec::new(),
+            requires_confirmation: false,
+            run_as_admin: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,4 +80,5 @@ pub enum ActionKind {
     OpenFile,
     AiPrompt,
     ToolCall,
+    AuroraIpc,
 }

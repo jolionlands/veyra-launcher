@@ -5,6 +5,7 @@ members = [
   "crates/veyra-core",
   "crates/veyra-import",
   "crates/veyra-platform",
+  "crates/veyra-plugin",
   "crates/veyra-protocol",
 ]
 resolver = "3"

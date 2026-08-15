@@ -5,4 +5,4 @@ pub mod search;
 
 pub use action::{Action, ActionKind};
 pub use catalog::{CatalogItem, IconRef, ItemCategory, seed_catalog};
-pub use search::{SearchResult, search};
+pub use search::{SearchIndex, SearchResult, search};
