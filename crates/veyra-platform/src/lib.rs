@@ -1496,6 +1496,11 @@ mod tests {
         let exe = root.join("myapp.exe");
         fs::create_dir_all(&root).unwrap();
         fs::write(&exe, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let mut seen_by_name = HashSet::new();
         let mut seen_by_path = HashSet::new();
@@ -1524,6 +1529,11 @@ mod tests {
         let exe = root.join("myapp.exe");
         fs::create_dir_all(&root).unwrap();
         fs::write(&exe, b"").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+        }
 
         let mut seen_by_name = HashSet::new();
         let mut seen_by_path = HashSet::new();
