@@ -362,6 +362,7 @@ pub(crate) fn native_center_window(mode: WindowLayoutMode) {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn native_center_window(_mode: WindowLayoutMode) {}
 
 #[cfg(windows)]
@@ -398,6 +399,7 @@ pub(crate) fn native_monitor_logical_size(scale: f32) -> Option<Vec2> {
 }
 
 #[cfg(not(windows))]
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn native_monitor_logical_size(_scale: f32) -> Option<Vec2> {
     None
 }

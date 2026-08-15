@@ -1,5 +1,6 @@
 use std::sync::mpsc;
 use std::thread;
+#[cfg(windows)]
 use std::time::Duration;
 
 use eframe::egui;
