@@ -1,4 +1,5 @@
 /target/
+/dist/
 **/*.pdb
 *.log
 .env
@@ -7,4 +8,5 @@
 Thumbs.db
 portable/
 profile/
-
+# runtime SQLite caches (audit.sqlite, history.sqlite, sessions.sqlite, ...)
+data/
