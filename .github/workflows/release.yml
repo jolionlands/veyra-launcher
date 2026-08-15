@@ -14,48 +14,39 @@ jobs:
           - name: windows-x64
             runs-on: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: veyra-app.exe
+            alias: windows-x64
             archive: veyra-launcher-windows-x64.zip
+          - name: windows-arm64
+            runs-on: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            alias: windows-arm64
+            archive: veyra-launcher-windows-arm64.zip
           - name: linux-x64
             runs-on: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary: veyra-app
+            alias: linux-x64
             archive: veyra-launcher-linux-x64.tar.gz
+          - name: linux-arm64
+            runs-on: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            alias: linux-arm64
+            archive: veyra-launcher-linux-arm64.tar.gz
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} -p veyra-app
-      - name: Prepare dist directory
+      - name: Package release artifact
         if: runner.os == 'Windows'
         shell: pwsh
-        run: New-Item -ItemType Directory -Force dist | Out-Null
-      - name: Prepare dist directory
+        run: ./scripts/package-release.ps1 -Targets ${{ matrix.alias }}
+      - name: Package release artifact
         if: runner.os == 'Linux'
-        run: |
-          mkdir -p dist
-      - name: Package release artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $binary = "target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          if (-not (Test-Path $binary)) {
-            throw "Missing artifact: $binary"
-          }
-          Compress-Archive -Path $binary -DestinationPath "dist/${{ matrix.archive }}" -Force
-      - name: Package release artifact (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          binary="target/${{ matrix.target }}/release/${{ matrix.binary }}"
-          if [ ! -f "$binary" ]; then
-            echo "Missing artifact: $binary"
-            exit 1
-          fi
-          tar -czf "dist/${{ matrix.archive }}" -C "target/${{ matrix.target }}/release" "${{ matrix.binary }}"
+        run: bash scripts/package-release.sh ${{ matrix.alias }}
       - name: Upload package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: dist/${{ matrix.archive }}
+          path: |
+            dist/${{ matrix.archive }}
+            dist/${{ matrix.archive }}.sha256
