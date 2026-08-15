@@ -87,6 +87,7 @@ impl Default for IconRef {
 }
 
 pub fn seed_catalog() -> Vec<CatalogItem> {
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut items = vec![
         CatalogItem::new(
             "settings.display",
